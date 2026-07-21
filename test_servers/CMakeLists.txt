@@ -1,0 +1,2 @@
+add_executable(mng_test_mcp_server mng_test_mcp_server.cpp)
+target_compile_features(mng_test_mcp_server PRIVATE cxx_std_20)

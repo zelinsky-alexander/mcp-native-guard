@@ -39,6 +39,11 @@ add_library(mcp_native_guard_core
     src/proxy_core.cpp
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(mcp_native_guard_core PRIVATE src/linux_stdio_relay.cpp)
+    target_compile_definitions(mcp_native_guard_core PUBLIC MNG_HAS_LINUX_STDIO_RELAY=1)
+endif()
+
 add_library(
     mcp_native_guard::core
     ALIAS mcp_native_guard_core
@@ -136,6 +141,7 @@ include(CTest)
 
 if(BUILD_TESTING AND MNG_BUILD_TESTS)
     add_subdirectory(tests)
+    add_subdirectory(test_servers)
 endif()
 
 if(MNG_BUILD_BENCHMARKS)

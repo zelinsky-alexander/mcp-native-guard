@@ -1,4 +1,7 @@
 #include "mcp_native_guard/io/line_framer.hpp"
+#if defined(MNG_HAS_LINUX_STDIO_RELAY)
+#include "mcp_native_guard/process/linux_stdio_relay.hpp"
+#endif
 
 #include <array>
 #include <charconv>
@@ -20,9 +23,24 @@ void print_help(std::ostream& output) {
            << "  mcp-native-guard --help\n"
            << "  mcp-native-guard --version\n"
            << "  mcp-native-guard relay [--discard] [--max-message-bytes N]\n\n"
+           << "  mcp-native-guard run -- <server> [args...]\n\n"
            << "relay is an early framing-path harness. It validates bounded newline-delimited\n"
            << "messages and either forwards them to stdout or discards them for measurement.\n"
            << "It is not yet the security proxy MVP.\n";
+}
+
+int run_child(int argc, char** argv) {
+    if (argc < 4 || std::string_view{argv[2]} != "--") {
+        std::cerr << "usage: mcp-native-guard run -- <server> [args...]\n";
+        return 2;
+    }
+#if defined(MNG_HAS_LINUX_STDIO_RELAY)
+    return mng::process::run_stdio_child(
+        std::span<char* const>{argv + 3, static_cast<std::size_t>(argc - 3)});
+#else
+    std::cerr << "run is supported only on Linux\n";
+    return 2;
+#endif
 }
 
 bool parse_size(std::string_view text, std::size_t& value) {
@@ -122,6 +140,9 @@ int main(int argc, char** argv) {
     }
     if (std::string_view{argv[1]} == "relay") {
         return run_relay(argc, argv);
+    }
+    if (std::string_view{argv[1]} == "run") {
+        return run_child(argc, argv);
     }
 
     std::cerr << "unknown command: " << argv[1] << '\n';
