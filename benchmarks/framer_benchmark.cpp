@@ -1,4 +1,5 @@
 #include "mcp_native_guard/io/line_framer.hpp"
+#include "mcp_native_guard/protocol/json_rpc_envelope.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -28,17 +29,25 @@ int main() {
     std::uint64_t checksum = 0;
     std::uint64_t processed_bytes = 0;
     std::uint64_t batch_count = 0;
+    mng::protocol::JsonRpcEnvelopeClassifier classifier;
 
     const auto start = std::chrono::steady_clock::now();
     do {
         mng::io::LineFramer framer{{1024U * 1024U, 4096U, true}};
+        bool classification_failed = false;
         for (std::size_t offset = 0; offset < input.size();) {
             const auto count = std::min(chunk_size, input.size() - offset);
             const auto status = framer.feed(
                 std::span<const char>{input.data() + offset, count},
                 [&](std::string_view value) {
+                    const auto envelope = classifier.classify(value);
+                    if (!envelope || envelope.kind != mng::protocol::EnvelopeKind::request) {
+                        classification_failed = true;
+                        return;
+                    }
                     ++observed_messages;
-                    checksum += value.size();
+                    checksum += value.size() + envelope.method.size() +
+                                static_cast<std::uint64_t>(envelope.id_kind);
                 });
             if (!status) {
                 std::cerr << status.message << '\n';
@@ -49,6 +58,10 @@ int main() {
 
         if (!framer.finish()) {
             std::cerr << "framer did not finish cleanly\n";
+            return 1;
+        }
+        if (classification_failed) {
+            std::cerr << "JSON-RPC envelope classification failed\n";
             return 1;
         }
 

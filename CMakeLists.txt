@@ -33,6 +33,7 @@ if(MNG_ENABLE_LTO)
 endif()
 
 add_library(mcp_native_guard_core
+    src/json_rpc_envelope.cpp
     src/line_framer.cpp
     src/policy.cpp
     src/proxy_core.cpp

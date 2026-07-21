@@ -30,7 +30,7 @@
         "CMAKE_BUILD_TYPE": "Release",
         "MNG_BUILD_TESTS": "OFF",
         "MNG_BUILD_BENCHMARKS": "ON",
-        "MNG_ENABLE_LTO": "ON"
+        "MNG_ENABLE_LTO": "OFF"
       }
     }
   ],

@@ -1,4 +1,5 @@
 #include "mcp_native_guard/io/line_framer.hpp"
+#include "mcp_native_guard/protocol/json_rpc_envelope.hpp"
 #include "mcp_native_guard/proxy/proxy_core.hpp"
 #include "mcp_native_guard/security/policy.hpp"
 
@@ -71,6 +72,77 @@ void test_line_framer_detects_truncation() {
     CHECK(status.code == mng::StatusCode::truncated_message);
 }
 
+void test_json_rpc_envelope_classifies_request_notification_and_response() {
+    mng::protocol::JsonRpcEnvelopeClassifier classifier;
+
+    const auto request = classifier.classify(
+        R"({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"demo.read"}})");
+    CHECK(request);
+    CHECK(request.kind == mng::protocol::EnvelopeKind::request);
+    CHECK(request.id_kind == mng::protocol::IdKind::number);
+    CHECK(request.method == "tools/call");
+
+    const auto notification = classifier.classify(
+        R"({"jsonrpc":"2.0","method":"notifications/progress","params":[1,2,3]})");
+    CHECK(notification);
+    CHECK(notification.kind == mng::protocol::EnvelopeKind::notification);
+    CHECK(notification.id_kind == mng::protocol::IdKind::absent);
+
+    const auto response = classifier.classify(
+        R"({"jsonrpc":"2.0","id":"abc","result":{"items":[true,null]}})");
+    CHECK(response);
+    CHECK(response.kind == mng::protocol::EnvelopeKind::response);
+    CHECK(response.id_kind == mng::protocol::IdKind::string);
+}
+
+void test_json_rpc_envelope_rejects_ambiguous_or_malformed_input() {
+    mng::protocol::JsonRpcEnvelopeClassifier classifier;
+
+    const auto duplicate = classifier.classify(
+        R"({"jsonrpc":"2.0","method":"a","method":"b"})");
+    CHECK(!duplicate);
+    CHECK(duplicate.error == mng::protocol::ClassificationError::duplicate_member);
+
+    const auto escaped_method = classifier.classify(
+        R"({"jsonrpc":"2.0","method":"tools\/call"})");
+    CHECK(!escaped_method);
+    CHECK(escaped_method.error == mng::protocol::ClassificationError::invalid_envelope);
+
+    const auto escaped_member = classifier.classify(
+        R"({"jsonrpc":"2.0","m\u0065thod":"tools/call"})");
+    CHECK(!escaped_member);
+    CHECK(escaped_member.error == mng::protocol::ClassificationError::malformed_json);
+
+    const auto nested_method = classifier.classify(
+        R"({"jsonrpc":"2.0","params":{"method":"tools/call"}})");
+    CHECK(!nested_method);
+    CHECK(nested_method.error == mng::protocol::ClassificationError::invalid_envelope);
+
+    const auto unsupported_version = classifier.classify(
+        R"({"jsonrpc":"1.0","method":"tools/call"})");
+    CHECK(!unsupported_version);
+    CHECK(unsupported_version.error == mng::protocol::ClassificationError::unsupported_jsonrpc_version);
+
+    const auto malformed = classifier.classify(R"({"jsonrpc":"2.0","method":"tools/call")");
+    CHECK(!malformed);
+    CHECK(malformed.error == mng::protocol::ClassificationError::malformed_json);
+}
+
+void test_json_rpc_envelope_respects_input_limit() {
+    mng::protocol::JsonRpcEnvelopeClassifier classifier{{16U, 4U}};
+    const auto envelope = classifier.classify(R"({"jsonrpc":"2.0","method":"x"})");
+    CHECK(!envelope);
+    CHECK(envelope.error == mng::protocol::ClassificationError::message_too_large);
+}
+
+void test_json_rpc_envelope_respects_nesting_limit() {
+    mng::protocol::JsonRpcEnvelopeClassifier classifier{{1024U, 1U}};
+    const auto envelope = classifier.classify(
+        R"({"jsonrpc":"2.0","id":1,"result":{"items":[true]}})");
+    CHECK(!envelope);
+    CHECK(envelope.error == mng::protocol::ClassificationError::malformed_json);
+}
+
 mng::security::PolicyTable build_policy() {
     std::vector<mng::security::ToolRule> rules{
         {"filesystem.write_file", mng::security::Access::allow, mng::security::Access::deny},
@@ -126,6 +198,10 @@ int main() {
     test_line_framer_split_messages();
     test_line_framer_rejects_oversized_message();
     test_line_framer_detects_truncation();
+    test_json_rpc_envelope_classifies_request_notification_and_response();
+    test_json_rpc_envelope_rejects_ambiguous_or_malformed_input();
+    test_json_rpc_envelope_respects_input_limit();
+    test_json_rpc_envelope_respects_nesting_limit();
     test_policy_lookup();
     test_policy_rejects_duplicates();
     test_proxy_core_decisions_and_counters();
