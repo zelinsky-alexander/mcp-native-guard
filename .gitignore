@@ -9,3 +9,4 @@
 *.VC.VC.opendb
 *.log
 *.jsonl
+benchmark-results/json-rpc-lto-comparison.txt

@@ -1,3 +1,7 @@
 add_executable(mng_framer_benchmark framer_benchmark.cpp)
 target_compile_features(mng_framer_benchmark PRIVATE cxx_std_20)
 target_link_libraries(mng_framer_benchmark PRIVATE mcp_native_guard::core)
+
+add_executable(mng_proxy_pipeline_benchmark proxy_pipeline_benchmark.cpp)
+target_compile_features(mng_proxy_pipeline_benchmark PRIVATE cxx_std_20)
+target_link_libraries(mng_proxy_pipeline_benchmark PRIVATE mcp_native_guard::core)
