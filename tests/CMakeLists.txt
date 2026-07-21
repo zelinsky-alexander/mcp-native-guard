@@ -1,0 +1,4 @@
+add_executable(mcp_native_guard_tests test_main.cpp)
+target_compile_features(mcp_native_guard_tests PRIVATE cxx_std_20)
+target_link_libraries(mcp_native_guard_tests PRIVATE mcp_native_guard::core)
+add_test(NAME mcp_native_guard_tests COMMAND mcp_native_guard_tests)

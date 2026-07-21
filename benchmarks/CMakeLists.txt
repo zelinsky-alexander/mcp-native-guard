@@ -1,0 +1,3 @@
+add_executable(mng_framer_benchmark framer_benchmark.cpp)
+target_compile_features(mng_framer_benchmark PRIVATE cxx_std_20)
+target_link_libraries(mng_framer_benchmark PRIVATE mcp_native_guard::core)
