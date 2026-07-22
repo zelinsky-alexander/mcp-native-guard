@@ -22,6 +22,7 @@ call-time policy enforcement, tool-definition baselines, and an append-only audi
 - Immutable sorted tool-policy table with allocation-free lookup.
 - Deterministic policy-decision core with relaxed atomic counters.
 - Linux stdio child supervision with bounded, nonblocking relay buffers.
+- Bounded one-time loading of version 1 local JSON tool policies.
 - Repeatable command-line deny rules for `tools/call` enforcement and `tools/list` visibility.
 - Focused dependency-free tests.
 - Optional dependency-free framing microbenchmark.
@@ -52,7 +53,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"ping"}' \
 
 The `relay` command is only a framing-path harness. It is not the security proxy MVP.
 
-Run a downstream test MCP server while denying selected tools:
+Run a downstream test MCP server with a local policy and an optional command-line deny override:
 
 ```bash
 printf '%s\n' \
@@ -61,9 +62,33 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":"blocked-2","method":"tools/call","params":{"name":"blocked.tool"}}' \
   '{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}' \
   | ./build/dev-debug/mcp-native-guard run \
+      --policy examples/policy.json \
       --deny-tool blocked.tool \
       -- ./build/dev-debug/test_servers/mng_test_mcp_server
 ```
+
+Policy format version 1 uses explicit defaults and per-tool visibility/invocation access:
+
+```json
+{
+  "version": 1,
+  "defaults": {
+    "visibility": "allow",
+    "invocation": "allow"
+  },
+  "tools": [
+    {
+      "name": "filesystem.write_file",
+      "visibility": "deny",
+      "invocation": "deny"
+    }
+  ]
+}
+```
+
+The file is read and parsed once, before the downstream process starts. Tool names containing JSON
+escapes are rejected in this version; write tool names as unescaped JSON strings. Repeated
+`--deny-tool NAME` options are applied after file loading and deny both visibility and invocation.
 
 Denied requests are not sent to the child. They currently receive project-specific JSON-RPC error
 code `-32001` with message `Tool call denied by policy`; this code is temporary until the project's
@@ -72,8 +97,6 @@ public error contract is finalized. Denied notifications are silently dropped. I
 
 The proxy correlates bounded outstanding `tools/list` requests with server responses and removes
 denied tool definitions while preserving unrelated response fields and allowed definitions.
-
-The `run` command accepts in-memory CLI deny rules only. It does not load policy files.
 
 ## Performance measurement
 

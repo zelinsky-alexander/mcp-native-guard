@@ -1,9 +1,14 @@
 {
   "version": 1,
-  "defaults": {"visible": false, "callable": false},
-  "limits": {"max_message_bytes": 1048576},
+  "defaults": {
+    "visibility": "allow",
+    "invocation": "allow"
+  },
   "tools": [
-    {"name": "filesystem.read_file", "visible": true, "callable": true},
-    {"name": "filesystem.write_file", "visible": true, "callable": false}
+    {
+      "name": "filesystem.write_file",
+      "visibility": "deny",
+      "invocation": "deny"
+    }
   ]
 }

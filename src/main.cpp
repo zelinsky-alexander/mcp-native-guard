@@ -3,6 +3,7 @@
 #include "mcp_native_guard/process/linux_stdio_relay.hpp"
 #include "mcp_native_guard/protocol/tool_call_filter.hpp"
 #include "mcp_native_guard/security/policy.hpp"
+#include "mcp_native_guard/security/policy_loader.hpp"
 #endif
 
 #include <array>
@@ -28,17 +29,19 @@ void print_help(std::ostream& output) {
            << "  mcp-native-guard --help\n"
            << "  mcp-native-guard --version\n"
            << "  mcp-native-guard relay [--discard] [--max-message-bytes N]\n\n"
-           << "  mcp-native-guard run [--deny-tool TOOL_NAME ...] -- <server> [args...]\n\n"
+           << "  mcp-native-guard run [--policy FILE] [--deny-tool TOOL_NAME ...] --\n"
+           << "      <server> [args...]\n\n"
            << "relay is an early framing-path harness. It validates bounded newline-delimited\n"
            << "messages and either forwards them to stdout or discards them for measurement.\n"
            << "It is not yet the security proxy MVP.\n\n"
-           << "run launches one Linux stdio server. Each --deny-tool rule blocks invocation\n"
-           << "and hides that tool from correlated tools/list responses.\n";
+           << "run loads an optional bounded JSON policy before launching one Linux stdio server.\n"
+           << "Each --deny-tool rule overrides the file policy to deny invocation and visibility.\n";
 }
 
 int run_child(int argc, char** argv) {
 #if defined(MNG_HAS_LINUX_STDIO_RELAY)
-    std::vector<mng::security::ToolRule> rules;
+    std::vector<std::string> denied_tools;
+    std::string_view policy_path;
     int separator = -1;
     for (int index = 2; index < argc; ++index) {
         const std::string_view argument{argv[index]};
@@ -46,31 +49,56 @@ int run_child(int argc, char** argv) {
             separator = index;
             break;
         }
+        if (argument == "--policy") {
+            if (!policy_path.empty() || index + 1 >= argc ||
+                std::string_view{argv[index + 1]}.empty() ||
+                std::string_view{argv[index + 1]} == "--") {
+                std::cerr << "usage: mcp-native-guard run [--policy FILE] "
+                             "[--deny-tool TOOL_NAME ...] -- <server> [args...]\n";
+                return 2;
+            }
+            policy_path = argv[++index];
+            continue;
+        }
         if (argument != "--deny-tool" || index + 1 >= argc ||
-            std::string_view{argv[index + 1]}.empty() || std::string_view{argv[index + 1]} == "--") {
-            std::cerr << "usage: mcp-native-guard run [--deny-tool TOOL_NAME ...] -- "
-                         "<server> [args...]\n";
+            std::string_view{argv[index + 1]}.empty() ||
+            std::string_view{argv[index + 1]} == "--") {
+            std::cerr << "usage: mcp-native-guard run [--policy FILE] "
+                         "[--deny-tool TOOL_NAME ...] -- <server> [args...]\n";
             return 2;
         }
-        rules.push_back({
-            std::string{argv[++index]},
-            mng::security::Access::deny,
-            mng::security::Access::deny,
-        });
+        denied_tools.emplace_back(argv[++index]);
     }
     if (separator < 0 || separator + 1 >= argc) {
-        std::cerr << "usage: mcp-native-guard run [--deny-tool TOOL_NAME ...] -- "
-                     "<server> [args...]\n";
+        std::cerr << "usage: mcp-native-guard run [--policy FILE] "
+                     "[--deny-tool TOOL_NAME ...] -- <server> [args...]\n";
+        return 2;
+    }
+
+    mng::security::PolicyDefinition definition;
+    definition.defaults = {mng::security::Access::allow, mng::security::Access::allow};
+    if (!policy_path.empty()) {
+        const mng::security::PolicyLoader loader;
+        const auto load_status = loader.load_file(policy_path, definition);
+        if (!load_status) {
+            std::cerr << "policy error: " << load_status.message << " (" << policy_path << ")\n";
+            return 2;
+        }
+    }
+    const auto override_status =
+        mng::security::apply_deny_overrides(std::move(denied_tools), definition);
+    if (!override_status) {
+        std::cerr << "policy error: " << override_status.message << '\n';
         return 2;
     }
 
     mng::security::PolicyTable policy;
     const auto policy_status = mng::security::PolicyTable::build(
-        std::move(rules),
-        {mng::security::Access::allow, mng::security::Access::allow},
+        std::move(definition.rules),
+        definition.defaults,
         policy);
     if (!policy_status) {
-        std::cerr << "invalid deny rules: " << policy_status.message << '\n';
+        std::cerr << "policy error: " << policy_status.message << '\n';
         return 2;
     }
 

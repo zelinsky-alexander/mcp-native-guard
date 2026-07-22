@@ -10,6 +10,7 @@ locally launched or remote MCP server. The first supported data path will be new
 
 ```text
 client stdio
+    -> bounded startup policy-file loader
     -> bounded line framer
     -> typed JSON-RPC envelope classifier
     -> bounded tools/call parameter extractor
@@ -21,10 +22,13 @@ client stdio
     -> client stdio
 ```
 
-The current Linux path frames client JSONL, classifies JSON-RPC envelopes, extracts `tools/call`
-parameters without a DOM, and applies an immutable in-memory deny policy before forwarding. Server
-stdout is relayed transparently except for responses correlated to bounded pending `tools/list`
-requests, whose tool arrays are filtered. Other MCP methods are not yet policy-filtered.
+At startup, the current Linux path can read a bounded version 1 JSON policy, validate it without a
+DOM, apply command-line deny overrides, and build the immutable policy table before launching the
+child. At runtime it frames client JSONL, classifies JSON-RPC envelopes, extracts `tools/call`
+parameters, and applies that table before forwarding. Server stdout is relayed transparently except
+for responses correlated to bounded pending `tools/list` requests, whose tool arrays are filtered.
+Other MCP methods are not yet policy-filtered. Escaped policy tool names are rejected until bounded
+decoding has an explicit ownership design.
 
 ## Invariants
 
@@ -39,6 +43,7 @@ requests, whose tool arrays are filtered. Other MCP methods are not yet policy-f
    notification is dropped without a response.
 9. Pending `tools/list` correlations have fixed count, per-ID, and aggregate ID-size bounds and are
    removed on response or connection close.
+10. Policy files are size- and depth-bounded, parsed exactly once, and rejected before child launch.
 
 ## Hot-path model
 

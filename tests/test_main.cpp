@@ -4,6 +4,7 @@
 #include "mcp_native_guard/protocol/tool_call_filter.hpp"
 #include "mcp_native_guard/proxy/proxy_core.hpp"
 #include "mcp_native_guard/security/policy.hpp"
+#include "mcp_native_guard/security/policy_loader.hpp"
 
 #include <cstddef>
 #include <iostream>
@@ -634,6 +635,158 @@ void test_tools_list_pending_capacity_and_cleanup() {
           mng::process::ClientMessageAction::drop);
 }
 
+const mng::security::ToolRule* find_rule(
+    const mng::security::PolicyDefinition& policy,
+    std::string_view name) {
+    for (const auto& rule : policy.rules) {
+        if (rule.name == name) {
+            return &rule;
+        }
+    }
+    return nullptr;
+}
+
+void test_policy_loader_valid_policy_and_access_values() {
+    mng::security::PolicyDefinition policy;
+    const mng::security::PolicyLoader loader;
+    const auto result = loader.parse(
+        R"({"version":1,"defaults":{"visibility":"allow","invocation":"deny"},"tools":[{"name":"filesystem.read_file","visibility":"allow","invocation":"deny"},{"name":"filesystem.write_file","visibility":"deny","invocation":"allow"}]})",
+        policy);
+    CHECK(result);
+    CHECK(policy.defaults.visible == mng::security::Access::allow);
+    CHECK(policy.defaults.callable == mng::security::Access::deny);
+    CHECK(policy.rules.size() == 2U);
+    const auto* read = find_rule(policy, "filesystem.read_file");
+    const auto* write = find_rule(policy, "filesystem.write_file");
+    CHECK(read != nullptr);
+    CHECK(read != nullptr && read->visible == mng::security::Access::allow);
+    CHECK(read != nullptr && read->callable == mng::security::Access::deny);
+    CHECK(write != nullptr);
+    CHECK(write != nullptr && write->visible == mng::security::Access::deny);
+    CHECK(write != nullptr && write->callable == mng::security::Access::allow);
+}
+
+void test_policy_loader_allow_and_deny_defaults() {
+    const mng::security::PolicyLoader loader;
+    mng::security::PolicyDefinition allowed;
+    CHECK(loader.parse(
+        R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"}})",
+        allowed));
+    CHECK(allowed.defaults.visible == mng::security::Access::allow);
+    CHECK(allowed.defaults.callable == mng::security::Access::allow);
+    mng::security::PolicyTable allow_table;
+    CHECK(mng::security::PolicyTable::build(
+        std::move(allowed.rules), allowed.defaults, allow_table));
+    CHECK(allow_table.visibility_for("unlisted") == mng::security::Access::allow);
+    CHECK(allow_table.invocation_for("unlisted") == mng::security::Access::allow);
+
+    mng::security::PolicyDefinition denied;
+    CHECK(loader.parse(
+        R"({"defaults":{"invocation":"deny","visibility":"deny"},"version":1,"tools":[]})",
+        denied));
+    CHECK(denied.defaults.visible == mng::security::Access::deny);
+    CHECK(denied.defaults.callable == mng::security::Access::deny);
+    mng::security::PolicyTable deny_table;
+    CHECK(mng::security::PolicyTable::build(
+        std::move(denied.rules), denied.defaults, deny_table));
+    CHECK(deny_table.visibility_for("unlisted") == mng::security::Access::deny);
+    CHECK(deny_table.invocation_for("unlisted") == mng::security::Access::deny);
+}
+
+void test_policy_loader_rejects_duplicates_and_malformed_json() {
+    const mng::security::PolicyLoader loader;
+    mng::security::PolicyDefinition policy;
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":[{"name":"same","visibility":"allow","invocation":"allow"},{"name":"same","visibility":"deny","invocation":"deny"}]})",
+              policy)
+              .error == mng::security::PolicyLoadError::duplicate_tool_name);
+    CHECK(loader.parse(
+              R"({"version":1,"version":1,"defaults":{"visibility":"allow","invocation":"allow"}})",
+              policy)
+              .error == mng::security::PolicyLoadError::duplicate_member);
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","visibility":"deny","invocation":"allow"}})",
+              policy)
+              .error == mng::security::PolicyLoadError::duplicate_member);
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":[{"name":"x","name":"y","visibility":"allow","invocation":"allow"}]})",
+              policy)
+              .error == mng::security::PolicyLoadError::duplicate_member);
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},})",
+              policy)
+              .error == mng::security::PolicyLoadError::malformed_json);
+}
+
+void test_policy_loader_rejects_invalid_required_values() {
+    const mng::security::PolicyLoader loader;
+    mng::security::PolicyDefinition policy;
+    CHECK(loader.parse(
+              R"({"version":2,"defaults":{"visibility":"allow","invocation":"allow"}})",
+              policy)
+              .error == mng::security::PolicyLoadError::unsupported_version);
+    CHECK(loader.parse(R"({"version":1})", policy).error ==
+          mng::security::PolicyLoadError::missing_defaults);
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"allow"}})", policy)
+              .error == mng::security::PolicyLoadError::missing_defaults);
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"sometimes","invocation":"allow"}})",
+              policy)
+              .error == mng::security::PolicyLoadError::invalid_access);
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":[{"name":"x","visibility":"allow","invocation":"sometimes"}]})",
+              policy)
+              .error == mng::security::PolicyLoadError::invalid_access);
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":{}})",
+              policy)
+              .error == mng::security::PolicyLoadError::tools_not_array);
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":[{"visibility":"allow","invocation":"allow"}]})",
+              policy)
+              .error == mng::security::PolicyLoadError::invalid_tool);
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":[{"name":"","visibility":"allow","invocation":"allow"}]})",
+              policy)
+              .error == mng::security::PolicyLoadError::invalid_tool);
+    CHECK(loader.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":[{"name":"escaped\u002ename","visibility":"allow","invocation":"allow"}]})",
+              policy)
+              .error == mng::security::PolicyLoadError::escaped_tool_name);
+}
+
+void test_policy_loader_enforces_size_and_depth_bounds() {
+    mng::security::PolicyDefinition policy;
+    const mng::security::PolicyLoader small{{64U, 16U}};
+    CHECK(small.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"}})",
+              policy)
+              .error == mng::security::PolicyLoadError::file_too_large);
+
+    const mng::security::PolicyLoader shallow{{1024U, 2U}};
+    CHECK(shallow.parse(
+              R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":[{"name":"x","visibility":"allow","invocation":"allow"}]})",
+              policy)
+              .error == mng::security::PolicyLoadError::excessive_nesting);
+}
+
+void test_cli_deny_overrides_file_policy() {
+    const mng::security::PolicyLoader loader;
+    mng::security::PolicyDefinition policy;
+    CHECK(loader.parse(
+        R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":[{"name":"existing","visibility":"allow","invocation":"allow"}]})",
+        policy));
+    CHECK(mng::security::apply_deny_overrides({"existing", "new", "new"}, policy));
+    const auto* existing = find_rule(policy, "existing");
+    const auto* added = find_rule(policy, "new");
+    CHECK(existing != nullptr && existing->visible == mng::security::Access::deny);
+    CHECK(existing != nullptr && existing->callable == mng::security::Access::deny);
+    CHECK(added != nullptr && added->visible == mng::security::Access::deny);
+    CHECK(added != nullptr && added->callable == mng::security::Access::deny);
+    CHECK(policy.rules.size() == 2U);
+}
+
 } // namespace
 
 int main() {
@@ -671,6 +824,12 @@ int main() {
     test_tools_list_filter_string_numeric_ids_and_duplicate_members();
     test_tools_list_filter_rejects_malformed_oversized_and_deep_responses();
     test_tools_list_pending_capacity_and_cleanup();
+    test_policy_loader_valid_policy_and_access_values();
+    test_policy_loader_allow_and_deny_defaults();
+    test_policy_loader_rejects_duplicates_and_malformed_json();
+    test_policy_loader_rejects_invalid_required_values();
+    test_policy_loader_enforces_size_and_depth_bounds();
+    test_cli_deny_overrides_file_policy();
 
     if (failures != 0) {
         std::cerr << failures << " test check(s) failed\n";

@@ -36,6 +36,7 @@ add_library(mcp_native_guard_core
     src/json_rpc_envelope.cpp
     src/line_framer.cpp
     src/policy.cpp
+    src/policy_loader.cpp
     src/proxy_core.cpp
     src/tool_call_extractor.cpp
     src/tool_call_filter.cpp

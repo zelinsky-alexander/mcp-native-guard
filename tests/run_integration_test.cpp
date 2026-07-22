@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
@@ -88,6 +90,37 @@ struct RunResult final {
     int exit_code{1};
     std::string output;
     std::string error;
+};
+
+struct TemporaryFile final {
+    std::string path;
+
+    TemporaryFile() = default;
+    TemporaryFile(const TemporaryFile&) = delete;
+    TemporaryFile& operator=(const TemporaryFile&) = delete;
+
+    ~TemporaryFile() {
+        if (!path.empty()) {
+            (void)::unlink(path.c_str());
+        }
+    }
+
+    [[nodiscard]] bool create(std::string_view contents) {
+        std::array<char, 64> name{};
+        constexpr std::string_view pattern = "/tmp/mng-policy-test-XXXXXX";
+        std::copy(pattern.begin(), pattern.end(), name.begin());
+        const int descriptor = ::mkstemp(name.data());
+        if (descriptor < 0) {
+            return false;
+        }
+        FileDescriptor file{descriptor};
+        if (!write_all(file.value, contents)) {
+            (void)::unlink(name.data());
+            return false;
+        }
+        path = name.data();
+        return true;
+    }
 };
 
 [[nodiscard]] RunResult run_guard(
@@ -184,6 +217,69 @@ struct RunResult final {
             const_cast<char*>(server_path),
             nullptr,
         };
+        ::execv(guard_path, arguments);
+        _exit(127);
+    }
+
+    parent_input_read = {};
+    parent_output_write = {};
+    parent_error_write = {};
+    RunResult result;
+    if (!write_all(child_input_write.value, input)) {
+        return result;
+    }
+    child_input_write = {};
+    result.output = read_all(child_output_read);
+    result.error = read_all(child_error_read);
+    int status = 1;
+    if (::waitpid(pid, &status, 0) == pid && WIFEXITED(status)) {
+        result.exit_code = WEXITSTATUS(status);
+    }
+    return result;
+}
+
+[[nodiscard]] RunResult run_policy_guard(
+    const char* guard_path,
+    const char* server_path,
+    const char* policy_path,
+    std::string_view input,
+    bool add_cli_override) {
+    FileDescriptor parent_input_read;
+    FileDescriptor child_input_write;
+    FileDescriptor child_output_read;
+    FileDescriptor parent_output_write;
+    FileDescriptor child_error_read;
+    FileDescriptor parent_error_write;
+    if (!make_pipe(parent_input_read, child_input_write) ||
+        !make_pipe(child_output_read, parent_output_write) ||
+        !make_pipe(child_error_read, parent_error_write)) {
+        return {};
+    }
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        return {};
+    }
+    if (pid == 0) {
+        (void)::dup2(parent_input_read.value, STDIN_FILENO);
+        (void)::dup2(parent_output_write.value, STDOUT_FILENO);
+        (void)::dup2(parent_error_write.value, STDERR_FILENO);
+        char* arguments[] = {
+            const_cast<char*>(guard_path),
+            const_cast<char*>("run"),
+            const_cast<char*>("--policy"),
+            const_cast<char*>(policy_path),
+            const_cast<char*>("--deny-tool"),
+            const_cast<char*>("blocked.two"),
+            const_cast<char*>("--"),
+            const_cast<char*>(server_path),
+            nullptr,
+        };
+        if (!add_cli_override) {
+            arguments[4] = arguments[6];
+            arguments[5] = arguments[7];
+            arguments[6] = nullptr;
+        }
         ::execv(guard_path, arguments);
         _exit(127);
     }
@@ -347,6 +443,49 @@ int main(int argc, char** argv) {
             R"({"jsonrpc":"2.0","id":3,"result":{"protocolVersion":"2025-11-25")") !=
             std::string::npos,
         "ordinary MCP traffic passes through");
+
+    TemporaryFile valid_policy;
+    success &= check(valid_policy.create(
+        R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":[{"name":"blocked.one","visibility":"deny","invocation":"deny"}]})"),
+        "temporary valid policy is created");
+    if (!valid_policy.path.empty()) {
+        const auto policy_enforcement = run_policy_guard(
+            argv[1],
+            argv[3],
+            valid_policy.path.c_str(),
+            "{\"jsonrpc\":\"2.0\",\"id\":\"policy-list\",\"method\":\"tools/list\"}\n"
+            "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"blocked.one\"}}\n"
+            "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"allowed.tool\"}}\n",
+            true);
+        success &= check(policy_enforcement.exit_code == 0, "file-policy proxy exits cleanly");
+        success &= check(
+            policy_enforcement.output.find(R"("name":"allowed.tool")") != std::string::npos &&
+                policy_enforcement.output.find("denied test tool") == std::string::npos &&
+                policy_enforcement.output.find("second denied test tool") == std::string::npos,
+            "file and CLI policies filter tools/list visibility");
+        success &= check(
+            policy_enforcement.output.find(
+                R"({"jsonrpc":"2.0","id":21,"error":{"code":-32001,"message":"Tool call denied by policy"}})") !=
+                std::string::npos,
+            "file policy blocks denied tools/call");
+        success &= check(
+            policy_enforcement.output.find(
+                R"({"jsonrpc":"2.0","id":22,"result":{"tool":"allowed.tool"}})") !=
+                std::string::npos,
+            "file policy leaves allowed tool visible and callable");
+    }
+
+    TemporaryFile invalid_policy;
+    success &= check(invalid_policy.create(R"({"version":2})"), "temporary invalid policy is created");
+    if (!invalid_policy.path.empty()) {
+        const auto invalid = run_policy_guard(
+            argv[1], argv[2], invalid_policy.path.c_str(), {}, false);
+        success &= check(invalid.exit_code != 0, "invalid policy returns nonzero");
+        success &= check(invalid.error.find("policy error:") != std::string::npos,
+                         "invalid policy reports a clear stderr error");
+        success &= check(invalid.error.find("echo-server-stderr") == std::string::npos,
+                         "invalid policy prevents downstream child launch");
+    }
 
     return success ? 0 : 1;
 }
