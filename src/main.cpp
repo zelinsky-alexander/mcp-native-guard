@@ -1,5 +1,6 @@
 #include "mcp_native_guard/io/line_framer.hpp"
 #if defined(MNG_HAS_LINUX_STDIO_RELAY)
+#include "mcp_native_guard/audit/audit_sink.hpp"
 #include "mcp_native_guard/process/linux_stdio_relay.hpp"
 #include "mcp_native_guard/protocol/tool_call_filter.hpp"
 #include "mcp_native_guard/security/policy.hpp"
@@ -10,7 +11,9 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -29,19 +32,28 @@ void print_help(std::ostream& output) {
            << "  mcp-native-guard --help\n"
            << "  mcp-native-guard --version\n"
            << "  mcp-native-guard relay [--discard] [--max-message-bytes N]\n\n"
-           << "  mcp-native-guard run [--policy FILE] [--deny-tool TOOL_NAME ...] --\n"
+           << "  mcp-native-guard run [--policy FILE] [--deny-tool TOOL_NAME ...]\n"
+           << "      [--audit-file PATH | --audit-stderr] --\n"
            << "      <server> [args...]\n\n"
            << "relay is an early framing-path harness. It validates bounded newline-delimited\n"
            << "messages and either forwards them to stdout or discards them for measurement.\n"
            << "It is not yet the security proxy MVP.\n\n"
            << "run loads an optional bounded JSON policy before launching one Linux stdio server.\n"
-           << "Each --deny-tool rule overrides the file policy to deny invocation and visibility.\n";
+           << "Each --deny-tool rule overrides the file policy to deny invocation and visibility.\n"
+           << "Audit JSONL is disabled by default and is never written to MCP stdout.\n";
+}
+
+void print_run_usage(std::ostream& output) {
+    output << "usage: mcp-native-guard run [--policy FILE] [--deny-tool TOOL_NAME ...] "
+              "[--audit-file PATH | --audit-stderr] -- <server> [args...]\n";
 }
 
 int run_child(int argc, char** argv) {
 #if defined(MNG_HAS_LINUX_STDIO_RELAY)
     std::vector<std::string> denied_tools;
     std::string_view policy_path;
+    std::string_view audit_file_path;
+    bool audit_stderr = false;
     int separator = -1;
     for (int index = 2; index < argc; ++index) {
         const std::string_view argument{argv[index]};
@@ -53,25 +65,41 @@ int run_child(int argc, char** argv) {
             if (!policy_path.empty() || index + 1 >= argc ||
                 std::string_view{argv[index + 1]}.empty() ||
                 std::string_view{argv[index + 1]} == "--") {
-                std::cerr << "usage: mcp-native-guard run [--policy FILE] "
-                             "[--deny-tool TOOL_NAME ...] -- <server> [args...]\n";
+                print_run_usage(std::cerr);
                 return 2;
             }
             policy_path = argv[++index];
             continue;
         }
+        if (argument == "--audit-file") {
+            if (!audit_file_path.empty() || index + 1 >= argc ||
+                std::string_view{argv[index + 1]}.empty() ||
+                std::string_view{argv[index + 1]} == "--") {
+                print_run_usage(std::cerr);
+                return 2;
+            }
+            audit_file_path = argv[++index];
+            continue;
+        }
+        if (argument == "--audit-stderr") {
+            if (audit_stderr) {
+                print_run_usage(std::cerr);
+                return 2;
+            }
+            audit_stderr = true;
+            continue;
+        }
         if (argument != "--deny-tool" || index + 1 >= argc ||
             std::string_view{argv[index + 1]}.empty() ||
             std::string_view{argv[index + 1]} == "--") {
-            std::cerr << "usage: mcp-native-guard run [--policy FILE] "
-                         "[--deny-tool TOOL_NAME ...] -- <server> [args...]\n";
+            print_run_usage(std::cerr);
             return 2;
         }
         denied_tools.emplace_back(argv[++index]);
     }
-    if (separator < 0 || separator + 1 >= argc) {
-        std::cerr << "usage: mcp-native-guard run [--policy FILE] "
-                     "[--deny-tool TOOL_NAME ...] -- <server> [args...]\n";
+    if (separator < 0 || separator + 1 >= argc ||
+        (audit_stderr && !audit_file_path.empty())) {
+        print_run_usage(std::cerr);
         return 2;
     }
 
@@ -102,7 +130,23 @@ int run_child(int argc, char** argv) {
         return 2;
     }
 
-    mng::protocol::ToolCallFilter filter{std::move(policy)};
+    std::ofstream audit_file;
+    std::optional<mng::audit::JsonlAuditSink> audit_sink;
+    if (!audit_file_path.empty()) {
+        audit_file.open(
+            std::string{audit_file_path},
+            std::ios::out | std::ios::app | std::ios::binary);
+        if (!audit_file) {
+            std::cerr << "audit error: cannot open audit file (" << audit_file_path << ")\n";
+            return 2;
+        }
+        audit_sink.emplace(audit_file, std::cerr);
+    } else if (audit_stderr) {
+        audit_sink.emplace(std::cerr, std::cerr);
+    }
+
+    mng::protocol::ToolCallFilter filter{
+        std::move(policy), audit_sink ? &*audit_sink : nullptr};
     return mng::process::run_stdio_child(
         std::span<char* const>{
             argv + separator + 1,

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace mng::protocol {
 namespace {
@@ -78,6 +79,7 @@ enum class RewriteStatus : unsigned char { rewritten, passthrough, malformed };
     std::size_t& offset,
     std::size_t max_depth,
     proxy::ProxyCore& proxy,
+    std::vector<std::string_view>& removed_tools,
     std::string& rewritten,
     std::size_t& array_close) {
     if (max_depth < 3U || offset >= message.size() || message[offset++] != '[') {
@@ -96,12 +98,15 @@ enum class RewriteStatus : unsigned char { rewritten, passthrough, malformed };
         if (!parse_tool(message, offset, max_depth, name)) {
             return false;
         }
-        if (proxy.authorize_tool_visibility(name).should_forward()) {
+        const proxy::Decision visibility = proxy.authorize_tool_visibility(name);
+        if (visibility.should_forward()) {
             if (wrote_tool) {
                 rewritten.push_back(',');
             }
             rewritten.append(message.data() + tool_begin, offset - tool_begin);
             wrote_tool = true;
+        } else {
+            removed_tools.push_back(name);
         }
         skip_whitespace(message, offset);
         if (offset >= message.size()) {
@@ -124,6 +129,7 @@ enum class RewriteStatus : unsigned char { rewritten, passthrough, malformed };
     std::size_t& offset,
     std::size_t max_depth,
     proxy::ProxyCore& proxy,
+    std::vector<std::string_view>& removed_tools,
     std::string& rewritten,
     std::size_t& array_close) {
     if (max_depth < 2U || offset >= message.size() || message[offset++] != '{') {
@@ -146,7 +152,13 @@ enum class RewriteStatus : unsigned char { rewritten, passthrough, malformed };
         skip_whitespace(message, offset);
         if (key.contents == "tools") {
             if (saw_tools || !parse_tools_array(
-                                 message, offset, max_depth, proxy, rewritten, array_close)) {
+                                 message,
+                                 offset,
+                                 max_depth,
+                                 proxy,
+                                 removed_tools,
+                                 rewritten,
+                                 array_close)) {
                 return false;
             }
             saw_tools = true;
@@ -173,6 +185,7 @@ enum class RewriteStatus : unsigned char { rewritten, passthrough, malformed };
     std::string_view message,
     std::size_t max_depth,
     proxy::ProxyCore& proxy,
+    std::vector<std::string_view>& removed_tools,
     std::string& rewritten) {
     std::size_t offset = 0;
     std::size_t array_close = 0;
@@ -195,7 +208,13 @@ enum class RewriteStatus : unsigned char { rewritten, passthrough, malformed };
         skip_whitespace(message, offset);
         if (key.contents == "result") {
             if (saw_result || !parse_result(
-                                  message, offset, max_depth, proxy, rewritten, array_close)) {
+                                  message,
+                                  offset,
+                                  max_depth,
+                                  proxy,
+                                  removed_tools,
+                                  rewritten,
+                                  array_close)) {
                 return RewriteStatus::malformed;
             }
             saw_result = true;
@@ -238,18 +257,38 @@ enum class RewriteStatus : unsigned char { rewritten, passthrough, malformed };
 
 } // namespace
 
-ToolCallFilter::ToolCallFilter(security::PolicyTable policy) noexcept
-    : ToolCallFilter(std::move(policy), Config{}) {}
+ToolCallFilter::ToolCallFilter(
+    security::PolicyTable policy,
+    audit::AuditSink* audit_sink) noexcept
+    : ToolCallFilter(std::move(policy), Config{}, audit_sink) {}
 
-ToolCallFilter::ToolCallFilter(security::PolicyTable policy, Config config) noexcept
+ToolCallFilter::ToolCallFilter(
+    security::PolicyTable policy,
+    Config config,
+    audit::AuditSink* audit_sink) noexcept
     : classifier_{{config.max_message_bytes, config.max_nesting_depth}},
       extractor_{{config.max_message_bytes, config.max_nesting_depth}},
       proxy_{std::move(policy), {config.max_message_bytes}},
-      config_{config} {}
+      config_{config},
+      audit_sink_{audit_sink} {}
 
 process::ClientMessageDecision ToolCallFilter::inspect(std::string_view message) noexcept {
     const Envelope envelope = classifier_.classify(message);
     if (!envelope) {
+        if (audit_sink_ != nullptr) {
+            const bool oversized = envelope.error == ClassificationError::message_too_large;
+            audit_sink_->record({
+                envelope.method == "tools/call" ? audit::EventType::tool_call
+                                                : audit::EventType::message_rejected,
+                audit::Decision::deny,
+                oversized ? audit::Reason::message_too_large
+                          : audit::Reason::malformed_message,
+                {},
+                envelope.id_json,
+                message.size(),
+                true,
+            });
+        }
         if (envelope.method == "tools/call" && !envelope.id_json.empty()) {
             return {
                 process::ClientMessageAction::respond_with_error,
@@ -261,15 +300,39 @@ process::ClientMessageDecision ToolCallFilter::inspect(std::string_view message)
         return {process::ClientMessageAction::drop};
     }
     if (envelope.method != "tools/call") {
-        if (envelope.method == "tools/list" && envelope.kind == EnvelopeKind::request &&
-            !add_pending(envelope.id_json)) {
-            return {process::ClientMessageAction::drop};
+        if (envelope.method == "tools/list" && envelope.kind == EnvelopeKind::request) {
+            const PendingStatus pending = add_pending(envelope.id_json);
+            if (pending != PendingStatus::added) {
+                if (pending == PendingStatus::capacity_exhausted && audit_sink_ != nullptr) {
+                    audit_sink_->record({
+                        audit::EventType::correlation_exhausted,
+                        audit::Decision::deny,
+                        audit::Reason::capacity_exhausted,
+                        {},
+                        envelope.id_json,
+                        message.size(),
+                        true,
+                    });
+                }
+                return {process::ClientMessageAction::drop};
+            }
         }
         return {};
     }
 
     const ToolCallParams params = extractor_.extract(message);
     if (!params) {
+        if (audit_sink_ != nullptr) {
+            audit_sink_->record({
+                audit::EventType::tool_call,
+                audit::Decision::deny,
+                audit::Reason::invalid_parameters,
+                params.name,
+                envelope.id_json,
+                message.size(),
+                true,
+            });
+        }
         if (envelope.kind == EnvelopeKind::request) {
             return {
                 process::ClientMessageAction::respond_with_error,
@@ -282,6 +345,18 @@ process::ClientMessageDecision ToolCallFilter::inspect(std::string_view message)
     }
 
     const proxy::Decision decision = proxy_.authorize_tool_call(params.name, message.size());
+    if (audit_sink_ != nullptr) {
+        audit_sink_->record({
+            audit::EventType::tool_call,
+            decision.should_forward() ? audit::Decision::allow : audit::Decision::deny,
+            decision.should_forward() ? audit::Reason::policy_allowed
+                                      : audit::Reason::policy_denied,
+            params.name,
+            envelope.id_json,
+            message.size(),
+            true,
+        });
+    }
     if (decision.should_forward()) {
         return {};
     }
@@ -311,9 +386,27 @@ process::ServerMessageDecision ToolCallFilter::inspect_server(std::string_view m
 
     try {
         rewritten_response_.reserve(message.size());
+        std::vector<std::string_view> removed_tools;
         const RewriteStatus status = rewrite_tools_list_response(
-            message, config_.max_nesting_depth, proxy_, rewritten_response_);
+            message,
+            config_.max_nesting_depth,
+            proxy_,
+            removed_tools,
+            rewritten_response_);
         if (status == RewriteStatus::rewritten) {
+            if (audit_sink_ != nullptr) {
+                for (const std::string_view name : removed_tools) {
+                    audit_sink_->record({
+                        audit::EventType::tool_hidden,
+                        audit::Decision::deny,
+                        audit::Reason::policy_denied,
+                        name,
+                        envelope.id_json,
+                        message.size(),
+                        true,
+                    });
+                }
+            }
             return {process::ServerMessageAction::replace, rewritten_response_};
         }
         if (status == RewriteStatus::passthrough) {
@@ -325,26 +418,43 @@ process::ServerMessageDecision ToolCallFilter::inspect_server(std::string_view m
     return {process::ServerMessageAction::drop};
 }
 
-bool ToolCallFilter::add_pending(std::string_view id_json) noexcept {
+ToolCallFilter::PendingStatus ToolCallFilter::add_pending(std::string_view id_json) noexcept {
     const std::size_t capacity = std::min(config_.max_pending_requests, pending_.size());
-    if (id_json.empty() || id_json.size() > config_.max_pending_id_bytes ||
-        pending_count_ >= capacity ||
-        id_json.size() > config_.max_pending_total_id_bytes - pending_id_bytes_) {
-        return false;
-    }
     for (std::size_t index = 0; index < pending_count_; ++index) {
         if (pending_[index].id_json == id_json) {
-            return false;
+            return PendingStatus::duplicate;
         }
+    }
+    if (id_json.empty() || id_json.size() > config_.max_pending_id_bytes ||
+        pending_count_ >= capacity ||
+        pending_id_bytes_ > config_.max_pending_total_id_bytes ||
+        id_json.size() > config_.max_pending_total_id_bytes - pending_id_bytes_) {
+        return PendingStatus::capacity_exhausted;
     }
     try {
         pending_[pending_count_].id_json.assign(id_json);
     } catch (...) {
-        return false;
+        return PendingStatus::capacity_exhausted;
     }
     pending_id_bytes_ += id_json.size();
     ++pending_count_;
-    return true;
+    return PendingStatus::added;
+}
+
+void ToolCallFilter::message_too_large(
+    process::MessageDirection,
+    std::size_t encoded_message_bytes) noexcept {
+    if (audit_sink_ != nullptr) {
+        audit_sink_->record({
+            audit::EventType::message_rejected,
+            audit::Decision::deny,
+            audit::Reason::message_too_large,
+            {},
+            {},
+            encoded_message_bytes,
+            true,
+        });
+    }
 }
 
 bool ToolCallFilter::remove_pending(std::string_view id_json) noexcept {

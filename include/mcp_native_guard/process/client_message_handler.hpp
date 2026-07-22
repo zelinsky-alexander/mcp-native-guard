@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -7,6 +8,7 @@ namespace mng::process {
 
 enum class ClientMessageAction : std::uint8_t { forward = 0, drop, respond_with_error };
 enum class ServerMessageAction : std::uint8_t { forward = 0, replace, drop };
+enum class MessageDirection : std::uint8_t { client_to_server = 0, server_to_client };
 
 struct ClientMessageDecision final {
     ClientMessageAction action{ClientMessageAction::forward};
@@ -29,6 +31,7 @@ public:
     [[nodiscard]] virtual ServerMessageDecision inspect_server(std::string_view) noexcept {
         return {};
     }
+    virtual void message_too_large(MessageDirection, std::size_t) noexcept {}
     virtual void connection_closed() noexcept {}
 };
 

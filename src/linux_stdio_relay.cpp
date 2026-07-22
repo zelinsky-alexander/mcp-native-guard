@@ -461,6 +461,12 @@ int run_stdio_child(
                             }
                         });
                     if (!frame_status) {
+                        if (frame_status.code == StatusCode::message_too_large &&
+                            client_message_handler != nullptr) {
+                            client_message_handler->message_too_large(
+                                MessageDirection::client_to_server,
+                                client_framer.failed_message_bytes());
+                        }
                         std::cerr << "client framing error: " << frame_status.message << '\n';
                         return 3;
                     }
@@ -499,6 +505,12 @@ int run_stdio_child(
                             }
                         });
                     if (!frame_status) {
+                        if (frame_status.code == StatusCode::message_too_large &&
+                            client_message_handler != nullptr) {
+                            client_message_handler->message_too_large(
+                                MessageDirection::server_to_client,
+                                server_framer.failed_message_bytes());
+                        }
                         std::cerr << "server framing error: " << frame_status.message << '\n';
                         return 3;
                     }

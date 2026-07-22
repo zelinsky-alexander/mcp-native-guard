@@ -17,7 +17,10 @@ LineFramer::LineFramer(Config config, std::pmr::memory_resource* memory)
 
 Status LineFramer::append(std::span<const char> bytes) {
     if (bytes.size() > config_.max_message_bytes - buffer_.size()) {
-        return fail(StatusCode::message_too_large, "message exceeds configured limit");
+        return fail(
+            StatusCode::message_too_large,
+            "message exceeds configured limit",
+            buffer_.size() + bytes.size());
     }
     buffer_.insert(buffer_.end(), bytes.begin(), bytes.end());
     return Status::success();
@@ -37,12 +40,17 @@ void LineFramer::reset() noexcept {
     buffer_.clear();
     failed_ = false;
     failure_ = Status::success();
+    failed_message_bytes_ = 0U;
 }
 
-Status LineFramer::fail(StatusCode code, std::string_view message) noexcept {
+Status LineFramer::fail(
+    StatusCode code,
+    std::string_view message,
+    std::size_t failed_message_bytes) noexcept {
     buffer_.clear();
     failed_ = true;
     failure_ = Status{code, message};
+    failed_message_bytes_ = failed_message_bytes;
     return failure_;
 }
 

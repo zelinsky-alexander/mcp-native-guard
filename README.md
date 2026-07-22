@@ -24,6 +24,7 @@ call-time policy enforcement, tool-definition baselines, and an append-only audi
 - Linux stdio child supervision with bounded, nonblocking relay buffers.
 - Bounded one-time loading of version 1 local JSON tool policies.
 - Repeatable command-line deny rules for `tools/call` enforcement and `tools/list` visibility.
+- Optional bounded JSONL enforcement audit output to a local file or stderr.
 - Focused dependency-free tests.
 - Optional dependency-free framing microbenchmark.
 - Debug, sanitizer, and performance CMake presets.
@@ -67,6 +68,23 @@ printf '%s\n' \
       -- ./build/dev-debug/test_servers/mng_test_mcp_server
 ```
 
+Write structured enforcement decisions to a local JSONL audit file:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"allowed.tool"}}' \
+  | ./build/dev-debug/mcp-native-guard run \
+      --policy examples/policy.json \
+      --audit-file /tmp/mng-audit.jsonl \
+      -- ./build/dev-debug/test_servers/mng_test_mcp_server
+```
+
+Use `--audit-stderr` instead to emit the same compact JSONL records on stderr. Audit is disabled by
+default, and `--audit-file` and `--audit-stderr` cannot be combined. Audit output never uses stdout
+and never includes tool arguments or complete JSON-RPC messages. Audit files are opened in append
+mode before the child starts. If a runtime audit write fails, the proxy reports the failure once on
+stderr, disables later audit writes, and continues enforcing policy.
+
 Policy format version 1 uses explicit defaults and per-tool visibility/invocation access:
 
 ```json
@@ -97,6 +115,11 @@ public error contract is finalized. Denied notifications are silently dropped. I
 
 The proxy correlates bounded outstanding `tools/list` requests with server responses and removes
 denied tool definitions while preserving unrelated response fields and allowed definitions.
+
+Audit records cover allowed, denied, and invalid `tools/call` messages; removed `tools/list`
+definitions; oversized messages; and pending-correlation capacity exhaustion. Each record includes
+a UTC timestamp, event, decision, reason, and only the applicable tool name, raw request ID, and
+encoded message size.
 
 ## Performance measurement
 

@@ -5,7 +5,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <sys/types.h>
@@ -185,7 +187,8 @@ struct TemporaryFile final {
 [[nodiscard]] RunResult run_enforcement_guard(
     const char* guard_path,
     const char* server_path,
-    std::string_view input) {
+    std::string_view input,
+    bool audit_stderr = false) {
     FileDescriptor parent_input_read;
     FileDescriptor child_input_write;
     FileDescriptor child_output_read;
@@ -213,10 +216,16 @@ struct TemporaryFile final {
             const_cast<char*>("blocked.one"),
             const_cast<char*>("--deny-tool"),
             const_cast<char*>("blocked.two"),
+            const_cast<char*>("--audit-stderr"),
             const_cast<char*>("--"),
             const_cast<char*>(server_path),
             nullptr,
         };
+        if (!audit_stderr) {
+            arguments[6] = arguments[7];
+            arguments[7] = arguments[8];
+            arguments[8] = nullptr;
+        }
         ::execv(guard_path, arguments);
         _exit(127);
     }
@@ -299,6 +308,81 @@ struct TemporaryFile final {
         result.exit_code = WEXITSTATUS(status);
     }
     return result;
+}
+
+[[nodiscard]] RunResult run_audit_guard(
+    const char* guard_path,
+    const char* server_path,
+    const char* policy_path,
+    const char* audit_path,
+    std::string_view input,
+    bool add_stderr_conflict = false) {
+    FileDescriptor parent_input_read;
+    FileDescriptor child_input_write;
+    FileDescriptor child_output_read;
+    FileDescriptor parent_output_write;
+    FileDescriptor child_error_read;
+    FileDescriptor parent_error_write;
+    if (!make_pipe(parent_input_read, child_input_write) ||
+        !make_pipe(child_output_read, parent_output_write) ||
+        !make_pipe(child_error_read, parent_error_write)) {
+        return {};
+    }
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        return {};
+    }
+    if (pid == 0) {
+        (void)::dup2(parent_input_read.value, STDIN_FILENO);
+        (void)::dup2(parent_output_write.value, STDOUT_FILENO);
+        (void)::dup2(parent_error_write.value, STDERR_FILENO);
+        char* arguments[] = {
+            const_cast<char*>(guard_path),
+            const_cast<char*>("run"),
+            const_cast<char*>("--policy"),
+            const_cast<char*>(policy_path),
+            const_cast<char*>("--deny-tool"),
+            const_cast<char*>("blocked.two"),
+            const_cast<char*>("--audit-file"),
+            const_cast<char*>(audit_path),
+            const_cast<char*>("--audit-stderr"),
+            const_cast<char*>("--"),
+            const_cast<char*>(server_path),
+            nullptr,
+        };
+        if (!add_stderr_conflict) {
+            arguments[8] = arguments[9];
+            arguments[9] = arguments[10];
+            arguments[10] = nullptr;
+        }
+        ::execv(guard_path, arguments);
+        _exit(127);
+    }
+
+    parent_input_read = {};
+    parent_output_write = {};
+    parent_error_write = {};
+    RunResult result;
+    if (!write_all(child_input_write.value, input)) {
+        return result;
+    }
+    child_input_write = {};
+    result.output = read_all(child_output_read);
+    result.error = read_all(child_error_read);
+    int status = 1;
+    if (::waitpid(pid, &status, 0) == pid && WIFEXITED(status)) {
+        result.exit_code = WEXITSTATUS(status);
+    }
+    return result;
+}
+
+[[nodiscard]] std::string read_file(std::string_view path) {
+    std::ifstream input{std::string{path}, std::ios::binary};
+    if (!input) {
+        return {};
+    }
+    return {std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
 }
 
 [[nodiscard]] bool check(bool condition, std::string_view description) {
@@ -444,6 +528,24 @@ int main(int argc, char** argv) {
             std::string::npos,
         "ordinary MCP traffic passes through");
 
+    const auto stderr_audit = run_enforcement_guard(
+        argv[1],
+        argv[3],
+        "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":{\"name\":\"allowed.tool\"}}\n",
+        true);
+    success &= check(stderr_audit.exit_code == 0, "stderr-audited proxy exits cleanly");
+    success &= check(
+        stderr_audit.error.find(
+            R"("event":"tools/call","decision":"allow","reason":"policy_allowed","tool":"allowed.tool","request_id":12)") !=
+            std::string::npos,
+        "--audit-stderr emits structured JSONL records");
+    success &= check(
+        stderr_audit.output.find(R"("event":"tools/call")") == std::string::npos &&
+            stderr_audit.output.find(
+                R"({"jsonrpc":"2.0","id":12,"result":{"tool":"allowed.tool"}})") !=
+                std::string::npos,
+        "stderr audit does not contaminate MCP stdout");
+
     TemporaryFile valid_policy;
     success &= check(valid_policy.create(
         R"({"version":1,"defaults":{"visibility":"allow","invocation":"allow"},"tools":[{"name":"blocked.one","visibility":"deny","invocation":"deny"}]})"),
@@ -473,6 +575,89 @@ int main(int argc, char** argv) {
                 R"({"jsonrpc":"2.0","id":22,"result":{"tool":"allowed.tool"}})") !=
                 std::string::npos,
             "file policy leaves allowed tool visible and callable");
+
+        TemporaryFile audit_file;
+        success &= check(audit_file.create({}), "temporary audit file is created");
+        if (!audit_file.path.empty()) {
+            const auto audited = run_audit_guard(
+                argv[1],
+                argv[3],
+                valid_policy.path.c_str(),
+                audit_file.path.c_str(),
+                "{\"jsonrpc\":\"2.0\",\"id\":\"audit-list\",\"method\":\"tools/list\"}\n"
+                "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"tools/call\",\"params\":{\"name\":\"blocked.one\",\"arguments\":{\"secret\":\"do-not-log\"}}}\n"
+                "{\"jsonrpc\":\"2.0\",\"id\":32,\"method\":\"tools/call\",\"params\":{\"name\":\"allowed.tool\",\"arguments\":{\"value\":\"safe-to-server\"}}}\n");
+            success &= check(audited.exit_code == 0, "audited proxy and child exit cleanly");
+            success &= check(
+                audited.output.find(R"("name":"allowed.tool")") != std::string::npos &&
+                    audited.output.find("denied test tool") == std::string::npos,
+                "tools/list filtering still works with file audit");
+            success &= check(
+                audited.output.find(
+                    R"({"jsonrpc":"2.0","id":31,"error":{"code":-32001,"message":"Tool call denied by policy"}})") !=
+                    std::string::npos,
+                "denied call remains blocked with file audit");
+            success &= check(
+                audited.output.find(
+                    R"({"jsonrpc":"2.0","id":32,"result":{"tool":"allowed.tool"}})") !=
+                    std::string::npos,
+                "allowed call succeeds with file audit");
+            success &= check(
+                audited.output.find(R"("timestamp":)") == std::string::npos &&
+                    audited.output.find(R"("event":"tools/call")") == std::string::npos,
+                "MCP stdout remains protocol-only");
+
+            const std::string audit = read_file(audit_file.path);
+            success &= check(
+                audit.find(
+                    R"("event":"tools/list_tool_removed","decision":"deny","reason":"policy_denied","tool":"blocked.one","request_id":"audit-list")") !=
+                    std::string::npos,
+                "audit records hidden tools");
+            success &= check(
+                audit.find(
+                    R"("event":"tools/call","decision":"deny","reason":"policy_denied","tool":"blocked.one","request_id":31)") !=
+                    std::string::npos,
+                "audit records denied calls");
+            success &= check(
+                audit.find(
+                    R"("event":"tools/call","decision":"allow","reason":"policy_allowed","tool":"allowed.tool","request_id":32)") !=
+                    std::string::npos,
+                "audit records allowed calls");
+            success &= check(
+                audit.find("do-not-log") == std::string::npos &&
+                    audit.find("safe-to-server") == std::string::npos &&
+                    audit.find("arguments") == std::string::npos &&
+                    audit.find("jsonrpc") == std::string::npos,
+                "audit excludes arguments and full request bodies");
+
+            const auto conflict = run_audit_guard(
+                argv[1],
+                argv[2],
+                valid_policy.path.c_str(),
+                audit_file.path.c_str(),
+                {},
+                true);
+            success &= check(conflict.exit_code == 2, "conflicting audit options are rejected");
+            success &= check(
+                conflict.error.find("echo-server-stderr") == std::string::npos,
+                "audit option conflict prevents downstream child launch");
+        }
+
+        const std::string invalid_audit_path = valid_policy.path + "/audit.jsonl";
+        const auto audit_open_failure = run_audit_guard(
+            argv[1],
+            argv[2],
+            valid_policy.path.c_str(),
+            invalid_audit_path.c_str(),
+            {});
+        success &= check(audit_open_failure.exit_code != 0, "audit open failure returns nonzero");
+        success &= check(
+            audit_open_failure.error.find("audit error: cannot open audit file") !=
+                std::string::npos,
+            "audit open failure reports a clear startup error");
+        success &= check(
+            audit_open_failure.error.find("echo-server-stderr") == std::string::npos,
+            "audit open failure prevents downstream child launch");
     }
 
     TemporaryFile invalid_policy;

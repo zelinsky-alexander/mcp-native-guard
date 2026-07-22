@@ -53,7 +53,10 @@ public:
 
             if (buffer_.empty()) {
                 if (segment_size > config_.max_message_bytes) {
-                    return fail(StatusCode::message_too_large, "message exceeds configured limit");
+                    return fail(
+                        StatusCode::message_too_large,
+                        "message exceeds configured limit",
+                        segment_size);
                 }
                 emit(std::string_view{cursor, segment_size}, sink);
             } else {
@@ -78,6 +81,9 @@ public:
     [[nodiscard]] std::size_t max_message_bytes() const noexcept {
         return config_.max_message_bytes;
     }
+    [[nodiscard]] std::size_t failed_message_bytes() const noexcept {
+        return failed_message_bytes_;
+    }
 
 private:
     template <typename Sink>
@@ -89,12 +95,16 @@ private:
     }
 
     [[nodiscard]] Status append(std::span<const char> bytes);
-    [[nodiscard]] Status fail(StatusCode code, std::string_view message) noexcept;
+    [[nodiscard]] Status fail(
+        StatusCode code,
+        std::string_view message,
+        std::size_t failed_message_bytes = 0U) noexcept;
 
     Config config_;
     std::pmr::vector<char> buffer_;
     bool failed_{false};
     Status failure_{};
+    std::size_t failed_message_bytes_{0};
 };
 
 } // namespace mng::io

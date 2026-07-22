@@ -16,9 +16,9 @@ client stdio
     -> bounded tools/call parameter extractor
     -> immutable policy snapshot
     -> correlated tools/list response filter
+    -> bounded structured audit sink          [optional]
     -> tool-definition baseline verifier     [next milestone]
     -> Linux downstream process transport
-    -> response inspection and audit          [next milestone]
     -> client stdio
 ```
 
@@ -44,6 +44,8 @@ decoding has an explicit ownership design.
 9. Pending `tools/list` correlations have fixed count, per-ID, and aggregate ID-size bounds and are
    removed on response or connection close.
 10. Policy files are size- and depth-bounded, parsed exactly once, and rejected before child launch.
+11. Audit is opt-in, bounded to one compact record at a time, excludes message bodies and arguments,
+    and never writes to MCP stdout. Runtime audit failure does not weaken enforcement.
 
 ## Hot-path model
 

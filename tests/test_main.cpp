@@ -1,3 +1,4 @@
+#include "mcp_native_guard/audit/audit_sink.hpp"
 #include "mcp_native_guard/io/line_framer.hpp"
 #include "mcp_native_guard/protocol/json_rpc_envelope.hpp"
 #include "mcp_native_guard/protocol/tool_call_extractor.hpp"
@@ -6,11 +7,14 @@
 #include "mcp_native_guard/security/policy.hpp"
 #include "mcp_native_guard/security/policy_loader.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <iostream>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
+#include <streambuf>
 #include <utility>
 #include <vector>
 
@@ -63,6 +67,7 @@ void test_line_framer_rejects_oversized_message() {
 
     CHECK(!status);
     CHECK(status.code == mng::StatusCode::message_too_large);
+    CHECK(framer.failed_message_bytes() == 5U);
     CHECK(emitted == 0U);
 }
 
@@ -400,7 +405,9 @@ void test_proxy_core_decisions_and_counters() {
     CHECK(counters.oversized == 1U);
 }
 
-mng::protocol::ToolCallFilter build_tool_call_filter(std::vector<std::string> denied_tools) {
+mng::protocol::ToolCallFilter build_tool_call_filter(
+    std::vector<std::string> denied_tools,
+    mng::audit::AuditSink* audit_sink = nullptr) {
     std::vector<mng::security::ToolRule> rules;
     rules.reserve(denied_tools.size());
     for (std::string& name : denied_tools) {
@@ -416,7 +423,177 @@ mng::protocol::ToolCallFilter build_tool_call_filter(std::vector<std::string> de
         {mng::security::Access::allow, mng::security::Access::allow},
         policy);
     CHECK(status);
-    return mng::protocol::ToolCallFilter{std::move(policy)};
+    return mng::protocol::ToolCallFilter{std::move(policy), audit_sink};
+}
+
+std::size_t line_count(std::string_view text) {
+    return static_cast<std::size_t>(std::count(text.begin(), text.end(), '\n'));
+}
+
+void test_audit_allowed_denied_ids_and_absent_id() {
+    std::ostringstream output;
+    std::ostringstream diagnostics;
+    mng::audit::JsonlAuditSink audit{output, diagnostics};
+    auto filter = build_tool_call_filter({"blocked"}, &audit);
+
+    CHECK(filter.inspect(
+              R"({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"allowed"}})")
+              .action == mng::process::ClientMessageAction::forward);
+    CHECK(filter.inspect(
+              R"({"jsonrpc":"2.0","id":"deny-id","method":"tools/call","params":{"name":"blocked"}})")
+              .action == mng::process::ClientMessageAction::respond_with_error);
+    CHECK(filter.inspect(
+              R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"allowed"}})")
+              .action == mng::process::ClientMessageAction::forward);
+
+    const std::string records = output.str();
+    CHECK(records.find(
+              R"("event":"tools/call","decision":"allow","reason":"policy_allowed","tool":"allowed","request_id":7)") !=
+          std::string::npos);
+    CHECK(records.find(
+              R"("decision":"deny","reason":"policy_denied","tool":"blocked","request_id":"deny-id")") !=
+          std::string::npos);
+    CHECK(line_count(records) == 3U);
+    const std::size_t notification = records.rfind(R"("tool":"allowed")");
+    CHECK(notification != std::string::npos);
+    CHECK(notification != std::string::npos &&
+          records.find("request_id", notification) == std::string::npos);
+    CHECK(diagnostics.str().empty());
+}
+
+void test_audit_hidden_tool_and_invalid_call() {
+    std::ostringstream output;
+    std::ostringstream diagnostics;
+    mng::audit::JsonlAuditSink audit{output, diagnostics};
+    auto filter = build_tool_call_filter({"hidden"}, &audit);
+
+    CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":"list-id","method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(filter.inspect_server(
+              R"({"jsonrpc":"2.0","id":"list-id","result":{"tools":[{"name":"visible"},{"name":"hidden"}]}})")
+              .action == mng::process::ServerMessageAction::replace);
+    CHECK(filter.inspect(
+              R"({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"arguments":{"secret":"payload"}}})")
+              .action == mng::process::ClientMessageAction::respond_with_error);
+    CHECK(filter.inspect(
+              R"({"jsonrpc":"2.0","id":10,"method":"tools/call","params":)")
+              .action == mng::process::ClientMessageAction::respond_with_error);
+
+    const std::string records = output.str();
+    CHECK(records.find(
+              R"("event":"tools/list_tool_removed","decision":"deny","reason":"policy_denied","tool":"hidden","request_id":"list-id")") !=
+          std::string::npos);
+    CHECK(records.find(
+              R"("event":"tools/call","decision":"deny","reason":"invalid_parameters","request_id":9)") !=
+          std::string::npos);
+    CHECK(records.find(
+              R"("event":"tools/call","decision":"deny","reason":"malformed_message","request_id":10)") !=
+          std::string::npos);
+    CHECK(records.find("secret") == std::string::npos);
+    CHECK(records.find("payload") == std::string::npos);
+    CHECK(records.find("params") == std::string::npos);
+    CHECK(records.find("jsonrpc") == std::string::npos);
+}
+
+void test_audit_json_escaping_and_multiple_jsonl_records() {
+    std::ostringstream output;
+    std::ostringstream diagnostics;
+    mng::audit::JsonlAuditSink audit{output, diagnostics};
+    const std::string tool{"quote\"slash\\line\ncontrol\x01", 25U};
+    audit.record({
+        mng::audit::EventType::tool_call,
+        mng::audit::Decision::deny,
+        mng::audit::Reason::policy_denied,
+        tool,
+        R"("string-id")",
+        42U,
+        true,
+    });
+    audit.record({
+        mng::audit::EventType::message_rejected,
+        mng::audit::Decision::deny,
+        mng::audit::Reason::message_too_large,
+        {},
+        {},
+        1025U,
+        true,
+    });
+
+    const std::string records = output.str();
+    CHECK(records.find(R"("tool":"quote\"slash\\line\ncontrol\u0001")") !=
+          std::string::npos);
+    CHECK(records.find(R"("request_id":"string-id")") != std::string::npos);
+    CHECK(records.find(R"("message_size":42)") != std::string::npos);
+    CHECK(line_count(records) == 2U);
+    std::istringstream lines{records};
+    std::string line;
+    while (std::getline(lines, line)) {
+        CHECK(line.starts_with(R"({"timestamp":")"));
+        CHECK(line.find('T') != std::string::npos);
+        CHECK(line.find(R"(Z","event":)") != std::string::npos);
+        CHECK(line.ends_with('}'));
+    }
+}
+
+void test_audit_disabled_and_message_data_not_logged() {
+    std::ostringstream unused;
+    std::ostringstream diagnostics;
+    mng::audit::JsonlAuditSink audit{unused, diagnostics};
+    auto filter = build_tool_call_filter({"blocked"});
+    const std::string request =
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"blocked","arguments":{"token":"never-audit-this"}}})";
+    CHECK(filter.inspect(request).action ==
+          mng::process::ClientMessageAction::respond_with_error);
+    CHECK(unused.str().empty());
+}
+
+class FailingStreamBuffer final : public std::streambuf {
+protected:
+    std::streamsize xsputn(const char*, std::streamsize) override { return 0; }
+    int_type overflow(int_type) override { return traits_type::eof(); }
+};
+
+void test_audit_write_failure_keeps_enforcement_active_and_reports_once() {
+    FailingStreamBuffer buffer;
+    std::ostream output{&buffer};
+    std::ostringstream diagnostics;
+    mng::audit::JsonlAuditSink audit{output, diagnostics};
+    auto filter = build_tool_call_filter({"blocked"}, &audit);
+
+    CHECK(filter.inspect(
+              R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"allowed"}})")
+              .action == mng::process::ClientMessageAction::forward);
+    CHECK(filter.inspect(
+              R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"blocked"}})")
+              .action == mng::process::ClientMessageAction::respond_with_error);
+    CHECK(audit.failed());
+    CHECK(line_count(diagnostics.str()) == 1U);
+    CHECK(diagnostics.str().find("enforcement remains active") != std::string::npos);
+}
+
+void test_audit_oversize_and_pending_capacity_events() {
+    std::ostringstream output;
+    std::ostringstream diagnostics;
+    mng::audit::JsonlAuditSink audit{output, diagnostics};
+    mng::security::PolicyTable policy;
+    CHECK(mng::security::PolicyTable::build(
+        {}, {mng::security::Access::allow, mng::security::Access::allow}, policy));
+    mng::protocol::ToolCallFilter filter{
+        std::move(policy), {128U, 16U, 1U, 8U, 8U}, &audit};
+
+    filter.message_too_large(mng::process::MessageDirection::client_to_server, 129U);
+    CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::drop);
+
+    const std::string records = output.str();
+    CHECK(records.find(
+              R"("event":"message_rejected","decision":"deny","reason":"message_too_large","message_size":129)") !=
+          std::string::npos);
+    CHECK(records.find(
+              R"("event":"tools/list_correlation","decision":"deny","reason":"capacity_exhausted","request_id":2)") !=
+          std::string::npos);
 }
 
 void test_tool_call_filter_enforces_requests_and_notifications() {
@@ -816,6 +993,12 @@ int main() {
     test_policy_lookup();
     test_policy_rejects_duplicates();
     test_proxy_core_decisions_and_counters();
+    test_audit_allowed_denied_ids_and_absent_id();
+    test_audit_hidden_tool_and_invalid_call();
+    test_audit_json_escaping_and_multiple_jsonl_records();
+    test_audit_disabled_and_message_data_not_logged();
+    test_audit_write_failure_keeps_enforcement_active_and_reports_once();
+    test_audit_oversize_and_pending_capacity_events();
     test_tool_call_filter_enforces_requests_and_notifications();
     test_tool_call_filter_rejects_invalid_params_and_preserves_other_methods();
     test_tools_list_filter_removes_denied_tools_and_preserves_fields();
