@@ -1,3 +1,4 @@
+#include <charconv>
 #include <csignal>
 #include <iostream>
 #include <string>
@@ -9,6 +10,12 @@ int main(int argc, char** argv) {
     std::cerr << "echo-server-stderr\n";
     if (exit_immediately) {
         return 0;
+    }
+    if (argc == 3 && std::string_view{argv[1]} == "--exit-code") {
+        int status = 1;
+        const std::string_view text{argv[2]};
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), status);
+        return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() ? status : 125;
     }
     if (ignore_termination) {
         (void)::signal(SIGTERM, SIG_IGN);

@@ -36,6 +36,11 @@ public:
     [[nodiscard]] Access visibility_for(std::string_view tool_name) const noexcept;
     [[nodiscard]] Access invocation_for(std::string_view tool_name) const noexcept;
     [[nodiscard]] std::size_t rule_count() const noexcept { return rules_.size(); }
+    // Stable FNV-1a fingerprint of the canonical effective policy. This is an
+    // operational identity, not a cryptographic or tamper-resistant hash.
+    [[nodiscard]] std::string fingerprint() const;
+    [[nodiscard]] const std::vector<ToolRule>& rules() const noexcept { return rules_; }
+    [[nodiscard]] PolicyDefaults defaults() const noexcept { return defaults_; }
 
 private:
     [[nodiscard]] const ToolRule* find(std::string_view tool_name) const noexcept;

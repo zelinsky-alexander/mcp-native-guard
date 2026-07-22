@@ -7,6 +7,12 @@ project(
     LANGUAGES CXX
 )
 
+configure_file(
+    include/mcp_native_guard/version.hpp.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/mcp_native_guard/version.hpp
+    @ONLY
+)
+
 option(MNG_BUILD_TESTS "Build focused unit tests" ON)
 option(MNG_BUILD_BENCHMARKS "Build local microbenchmarks" OFF)
 option(MNG_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -44,7 +50,7 @@ add_library(mcp_native_guard_core
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_sources(mcp_native_guard_core PRIVATE src/linux_stdio_relay.cpp)
+    target_sources(mcp_native_guard_core PRIVATE src/linux_stdio_relay.cpp src/doctor.cpp)
     target_compile_definitions(mcp_native_guard_core PUBLIC MNG_HAS_LINUX_STDIO_RELAY=1)
 endif()
 
@@ -63,6 +69,7 @@ target_include_directories(
     mcp_native_guard_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
         $<INSTALL_INTERFACE:include>
 )
 

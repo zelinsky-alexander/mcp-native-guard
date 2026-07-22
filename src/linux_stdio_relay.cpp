@@ -323,7 +323,8 @@ enum class WriteStatus : unsigned char { data, retry, broken_pipe, error };
 int run_stdio_child(
     std::span<char* const> command,
     ClientMessageHandler* client_message_handler,
-    RunConfig config) noexcept {
+    RunConfig config,
+    RunObserver* observer) noexcept {
     constexpr std::size_t response_expansion_bytes = 4U * read_chunk_bytes + 512U;
     if (command.empty() || command.front() == nullptr || config.relay_buffer_bytes == 0U ||
         config.runtime.max_message_bytes == 0U || config.runtime.max_nesting_depth == 0U ||
@@ -346,6 +347,18 @@ int run_stdio_child(
         std::cerr << "failed to launch downstream process: " << std::strerror(errno) << '\n';
         return 4;
     }
+    RunResult run_result;
+    run_result.child_started = true;
+    class ObserverScope final {
+    public:
+        ObserverScope(RunObserver* observer, RunResult& result) : observer_{observer}, result_{result} {
+            if (observer_ != nullptr) observer_->child_started();
+        }
+        ~ObserverScope() { if (observer_ != nullptr) observer_->child_finished(result_); }
+    private:
+        RunObserver* observer_;
+        RunResult& result_;
+    } observer_scope{observer, run_result};
     ChildReaper reaper{child.pid};
     if (!set_nonblocking(STDIN_FILENO) || !set_nonblocking(STDOUT_FILENO) ||
         !set_nonblocking(child.stdin_write.get()) || !set_nonblocking(child.stdout_read.get())) {
@@ -566,7 +579,13 @@ int run_stdio_child(
         }
         reaper.mark_reaped();
     }
-    return termination_signal != 0 ? 128 + termination_signal : exit_code_from_status(child_status);
+    run_result.child_exit_status = exit_code_from_status(child_status);
+    run_result.proxy_exit_status = termination_signal != 0
+        ? 128 + termination_signal : run_result.child_exit_status;
+    run_result.clean_shutdown = termination_signal == 0 && run_result.child_exit_status == 0;
+    run_result.termination_reason = termination_signal != 0 ? "signal" :
+        (run_result.child_exit_status == 0 ? "child_exit" : "child_nonzero_exit");
+    return run_result.proxy_exit_status;
 }
 
 } // namespace mng::process

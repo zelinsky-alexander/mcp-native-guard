@@ -25,6 +25,8 @@ call-time policy enforcement, tool-definition baselines, and an append-only audi
 - Bounded one-time loading of version 1 local JSON tool policies.
 - Repeatable command-line deny rules for `tools/call` enforcement and `tools/list` visibility.
 - Optional bounded JSONL enforcement audit output to a local file or stderr.
+- Per-session start/end health records, safe server labels, and effective-policy fingerprints.
+- A bounded local `doctor` compatibility check and offline audit summary tool.
 - Focused dependency-free tests.
 - Optional dependency-free framing microbenchmark.
 - Debug, sanitizer, and performance CMake presets.
@@ -85,6 +87,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"allowed.tool"}}' \
   | ./build/dev-debug/mcp-native-guard run \
       --policy examples/policy.json \
+      --server-label local-test \
       --audit-file /tmp/mng-audit.jsonl \
       -- ./build/dev-debug/test_servers/mng_test_mcp_server
 ```
@@ -145,6 +148,10 @@ Audit records cover allowed, denied, and invalid `tools/call` messages; removed 
 definitions; oversized messages; and pending-correlation capacity exhaustion. Each record includes
 a UTC timestamp, event, decision, reason, and only the applicable tool name, raw request ID, and
 encoded message size.
+
+Managed operation remains per-session rather than daemon-based. Session schema, policy-fingerprint
+limitations, doctor usage, launcher templates, scheduled user smoke testing, and audit summary usage
+are documented in [`docs/managed-local-deployment.md`](docs/managed-local-deployment.md).
 
 ## Compatibility limits for 0.1
 

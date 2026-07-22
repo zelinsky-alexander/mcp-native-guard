@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily mcp-native-guard real MCP smoke test
+
+[Service]
+Type=oneshot
+# Replace both /ABSOLUTE paths before installing this user unit.
+WorkingDirectory=/ABSOLUTE/PATH/TO/mcp-native-guard
+ExecStart=/ABSOLUTE/PATH/TO/mcp-native-guard/scripts/smoke_real_mcp.sh --guard /ABSOLUTE/PATH/TO/mcp-native-guard/build/release/mcp-native-guard -- /usr/bin/npx -y @modelcontextprotocol/server-filesystem@2026.7.10 {sandbox}
+StandardOutput=journal
+StandardError=journal

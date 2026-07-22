@@ -163,6 +163,47 @@ namespace {
     return append(output, "}", limit);
 }
 
+template <typename Integer>
+[[nodiscard]] bool append_number(std::string& output, Integer value, std::size_t limit) {
+    std::array<char, 32> number{};
+    const auto result = std::to_chars(number.data(), number.data() + number.size(), value);
+    return result.ec == std::errc{} && append(
+        output, {number.data(), static_cast<std::size_t>(result.ptr - number.data())}, limit);
+}
+
+[[nodiscard]] bool format_session_start(
+    const SessionIdentity& identity, std::size_t limit, std::string& output) {
+    output.clear();
+    return append(output, R"({"ts":")", limit) && append_timestamp(output, limit) &&
+           append(output, R"(","event":"session_start","guard_version":)", limit) &&
+           append_json_string(output, identity.guard_version, limit) &&
+           append(output, R"(,"server_label":)", limit) && append_json_string(output, identity.server_label, limit) &&
+           append(output, R"(,"downstream_executable":)", limit) && append_json_string(output, identity.downstream_executable, limit) &&
+           append(output, R"(,"policy_hash":)", limit) && append_json_string(output, identity.policy_hash, limit) &&
+           append(output, R"(,"runtime_limits":{"max_message_bytes":)", limit) &&
+           append_number(output, identity.limits.max_message_bytes, limit) &&
+           append(output, R"(,"max_nesting_depth":)", limit) &&
+           append_number(output, identity.limits.max_nesting_depth, limit) &&
+           append(output, R"(,"max_pending_tools_list":)", limit) &&
+           append_number(output, identity.limits.max_pending_tools_list, limit) && append(output, "}}", limit);
+}
+
+[[nodiscard]] bool format_session_end(
+    const SessionIdentity& identity, const SessionEnd& end, std::size_t limit, std::string& output) {
+    output.clear();
+    return append(output, R"({"ts":")", limit) && append_timestamp(output, limit) &&
+           append(output, R"(","event":"session_end","guard_version":)", limit) &&
+           append_json_string(output, identity.guard_version, limit) &&
+           append(output, R"(,"server_label":)", limit) && append_json_string(output, identity.server_label, limit) &&
+           append(output, R"(,"downstream_executable":)", limit) && append_json_string(output, identity.downstream_executable, limit) &&
+           append(output, R"(,"policy_hash":)", limit) && append_json_string(output, identity.policy_hash, limit) &&
+           append(output, R"(,"child_exit_status":)", limit) && append_number(output, end.child_exit_status, limit) &&
+           append(output, R"(,"proxy_exit_status":)", limit) && append_number(output, end.proxy_exit_status, limit) &&
+           append(output, R"(,"termination_reason":)", limit) && append_json_string(output, end.termination_reason, limit) &&
+           append(output, R"(,"duration_ms":)", limit) && append_number(output, end.duration_ms, limit) &&
+           append(output, end.clean_shutdown ? R"(,"clean_shutdown":true})" : R"(,"clean_shutdown":false})", limit);
+}
+
 } // namespace
 
 JsonlAuditSink::JsonlAuditSink(std::ostream& destination, std::ostream& diagnostics)
@@ -194,6 +235,28 @@ void JsonlAuditSink::record(const AuditEvent& event) noexcept {
     } catch (...) {
         report_failure();
     }
+}
+
+void JsonlAuditSink::record_session_start(const SessionIdentity& identity) noexcept {
+    if (failed_) return;
+    try {
+        std::string line;
+        line.reserve(512U);
+        if (!format_session_start(identity, config_.max_record_bytes, line)) { report_failure(); return; }
+        *destination_ << line << '\n' << std::flush;
+        if (!*destination_) report_failure();
+    } catch (...) { report_failure(); }
+}
+
+void JsonlAuditSink::record_session_end(const SessionIdentity& identity, const SessionEnd& end) noexcept {
+    if (failed_) return;
+    try {
+        std::string line;
+        line.reserve(512U);
+        if (!format_session_end(identity, end, config_.max_record_bytes, line)) { report_failure(); return; }
+        *destination_ << line << '\n' << std::flush;
+        if (!*destination_) report_failure();
+    } catch (...) { report_failure(); }
 }
 
 void JsonlAuditSink::report_failure() noexcept {

@@ -6,6 +6,7 @@
 #include "mcp_native_guard/proxy/proxy_core.hpp"
 #include "mcp_native_guard/security/policy.hpp"
 #include "mcp_native_guard/security/policy_loader.hpp"
+#include "mcp_native_guard/version.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -1007,6 +1008,41 @@ void test_cli_deny_overrides_file_policy() {
     CHECK(policy.rules.size() == 2U);
 }
 
+void test_effective_policy_fingerprint_is_canonical_and_sensitive() {
+    using mng::security::Access;
+    using mng::security::PolicyTable;
+    PolicyTable first, reordered, changed;
+    CHECK(PolicyTable::build({{"b", Access::deny, Access::allow}, {"a", Access::allow, Access::deny}},
+                             {Access::allow, Access::deny}, first));
+    CHECK(PolicyTable::build({{"a", Access::allow, Access::deny}, {"b", Access::deny, Access::allow}},
+                             {Access::allow, Access::deny}, reordered));
+    CHECK(PolicyTable::build({{"a", Access::allow, Access::deny}, {"b", Access::deny, Access::deny}},
+                             {Access::allow, Access::deny}, changed));
+    CHECK(first.fingerprint() == reordered.fingerprint());
+    CHECK(first.fingerprint().starts_with("fnv1a64:"));
+    CHECK(first.fingerprint() != changed.fingerprint());
+}
+
+void test_session_audit_format_is_bounded_and_safe() {
+    std::ostringstream destination;
+    std::ostringstream diagnostics;
+    mng::audit::JsonlAuditSink sink{destination, diagnostics};
+    const mng::audit::SessionIdentity identity{
+        mng::version, "label-\"safe", "server", "fnv1a64:1234", {1024U, 8U, 4U}};
+    sink.record_session_start(identity);
+    sink.record_session_end(identity, {7, 7, 42U, false, "child_nonzero_exit"});
+    const std::string output = destination.str();
+    CHECK(output.find(R"("event":"session_start")") != std::string::npos);
+    CHECK(output.find(R"("event":"session_end")") != std::string::npos);
+    CHECK(output.find(R"("server_label":"label-\"safe")") != std::string::npos);
+    CHECK(output.find(R"("guard_version":"0.1.0")") != std::string::npos);
+    CHECK(output.find(R"("duration_ms":42)") != std::string::npos);
+    CHECK(output.find(R"("child_exit_status":7)") != std::string::npos);
+    CHECK(output.find(R"("clean_shutdown":false)") != std::string::npos);
+    CHECK(output.find("secret-argument") == std::string::npos);
+    CHECK(output.find("policy contents") == std::string::npos);
+}
+
 } // namespace
 
 int main() {
@@ -1057,6 +1093,8 @@ int main() {
     test_policy_loader_rejects_invalid_required_values();
     test_policy_loader_enforces_size_and_depth_bounds();
     test_cli_deny_overrides_file_policy();
+    test_effective_policy_fingerprint_is_canonical_and_sensitive();
+    test_session_audit_format_is_bounded_and_safe();
 
     if (failures != 0) {
         std::cerr << failures << " test check(s) failed\n";

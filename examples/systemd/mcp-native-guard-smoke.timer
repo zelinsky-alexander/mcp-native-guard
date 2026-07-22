@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule daily mcp-native-guard smoke test
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+Unit=mcp-native-guard-smoke.service
+
+[Install]
+WantedBy=timers.target
