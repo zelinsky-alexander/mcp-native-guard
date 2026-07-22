@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "defaults": {
+    "visibility": "allow",
+    "invocation": "allow"
+  },
+  "tools": [
+    {
+      "name": "write_file",
+      "visibility": "deny",
+      "invocation": "deny"
+    }
+  ]
+}

@@ -1,13 +1,19 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": {"major": 3, "minor": 24, "patch": 0},
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "base",
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {"CMAKE_EXPORT_COMPILE_COMMANDS": "ON"}
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
     },
     {
       "name": "dev-debug",
@@ -21,7 +27,9 @@
     {
       "name": "asan",
       "inherits": "dev-debug",
-      "cacheVariables": {"MNG_ENABLE_SANITIZERS": "ON"}
+      "cacheVariables": {
+        "MNG_ENABLE_SANITIZERS": "ON"
+      }
     },
     {
       "name": "perf",
@@ -32,15 +40,50 @@
         "MNG_BUILD_BENCHMARKS": "ON",
         "MNG_ENABLE_LTO": "OFF"
       }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "MNG_BUILD_TESTS": "OFF",
+        "MNG_BUILD_BENCHMARKS": "OFF",
+        "MNG_ENABLE_LTO": "OFF"
+      }
     }
   ],
   "buildPresets": [
-    {"name": "dev-debug", "configurePreset": "dev-debug"},
-    {"name": "asan", "configurePreset": "asan"},
-    {"name": "perf", "configurePreset": "perf"}
+    {
+      "name": "dev-debug",
+      "configurePreset": "dev-debug"
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan"
+    },
+    {
+      "name": "perf",
+      "configurePreset": "perf"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    }
   ],
   "testPresets": [
-    {"name": "dev-debug", "configurePreset": "dev-debug", "output": {"outputOnFailure": true}},
-    {"name": "asan", "configurePreset": "asan", "output": {"outputOnFailure": true}}
+    {
+      "name": "dev-debug",
+      "configurePreset": "dev-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
   ]
 }
