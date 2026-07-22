@@ -22,7 +22,7 @@ call-time policy enforcement, tool-definition baselines, and an append-only audi
 - Immutable sorted tool-policy table with allocation-free lookup.
 - Deterministic policy-decision core with relaxed atomic counters.
 - Linux stdio child supervision with bounded, nonblocking relay buffers.
-- Repeatable command-line deny rules for `tools/call` enforcement.
+- Repeatable command-line deny rules for `tools/call` enforcement and `tools/list` visibility.
 - Focused dependency-free tests.
 - Optional dependency-free framing microbenchmark.
 - Debug, sanitizer, and performance CMake presets.
@@ -56,6 +56,7 @@ Run a downstream test MCP server while denying selected tools:
 
 ```bash
 printf '%s\n' \
+  '{"jsonrpc":"2.0","id":"list-1","method":"tools/list"}' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"allowed.tool"}}' \
   '{"jsonrpc":"2.0","id":"blocked-2","method":"tools/call","params":{"name":"blocked.tool"}}' \
   '{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}' \
@@ -69,8 +70,10 @@ code `-32001` with message `Tool call denied by policy`; this code is temporary 
 public error contract is finalized. Denied notifications are silently dropped. Invalid
 `tools/call` parameters with a usable request ID receive `-32602`.
 
-The `run` command accepts in-memory CLI deny rules only. It does not load policy files or filter
-`tools/list` responses.
+The proxy correlates bounded outstanding `tools/list` requests with server responses and removes
+denied tool definitions while preserving unrelated response fields and allowed definitions.
+
+The `run` command accepts in-memory CLI deny rules only. It does not load policy files.
 
 ## Performance measurement
 
@@ -87,10 +90,9 @@ Results are meaningful only with hardware, compiler, flags, and workload recorde
 
 1. Select and benchmark an authoritative JSON parser under an approved permissive licence.
 2. Implement typed JSON-RPC and MCP request/response validation.
-3. Filter denied tools from `tools/list` independently of the implemented `tools/call` enforcement.
-4. Canonicalize and fingerprint approved tool definitions.
-5. Add an append-only hash-chained audit sink.
-6. Add Windows Job Object and Linux process-control backends.
+3. Canonicalize and fingerprint approved tool definitions.
+4. Add an append-only hash-chained audit sink.
+5. Add Windows Job Object and Linux process-control backends.
 
 ## Engineering principles
 

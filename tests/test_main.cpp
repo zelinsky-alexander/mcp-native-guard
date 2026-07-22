@@ -405,7 +405,7 @@ mng::protocol::ToolCallFilter build_tool_call_filter(std::vector<std::string> de
     for (std::string& name : denied_tools) {
         rules.push_back({
             std::move(name),
-            mng::security::Access::allow,
+            mng::security::Access::deny,
             mng::security::Access::deny,
         });
     }
@@ -461,6 +461,179 @@ void test_tool_call_filter_rejects_invalid_params_and_preserves_other_methods() 
     CHECK(unusable.action == mng::process::ClientMessageAction::drop);
 }
 
+void test_tools_list_filter_removes_denied_tools_and_preserves_fields() {
+    auto filter = build_tool_call_filter({"blocked.one"});
+    CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+
+    const std::string response =
+        R"({"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"allowed.one","description":"kept","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}},{"name":"blocked.one","description":"removed"}],"nextCursor":"cursor-1"}})";
+    const auto decision = filter.inspect_server(response);
+    CHECK(decision.action == mng::process::ServerMessageAction::replace);
+    CHECK(decision.replacement.find(R"("name":"allowed.one")") != std::string_view::npos);
+    CHECK(decision.replacement.find(R"("description":"kept")") != std::string_view::npos);
+    CHECK(decision.replacement.find(
+              R"("inputSchema":{"type":"object","properties":{"value":{"type":"string"}}})") !=
+          std::string_view::npos);
+    CHECK(decision.replacement.find("blocked.one") == std::string_view::npos);
+    CHECK(decision.replacement.find(R"("nextCursor":"cursor-1")") != std::string_view::npos);
+    CHECK(filter.pending_request_count() == 0U);
+}
+
+void test_tools_list_filter_multiple_all_allowed_and_all_denied() {
+    auto multiple = build_tool_call_filter({"blocked.one", "blocked.two"});
+    CHECK(multiple.inspect(R"({"jsonrpc":"2.0","id":"multi","method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    const auto multiple_result = multiple.inspect_server(
+        R"({"jsonrpc":"2.0","id":"multi","result":{"tools":[{"name":"blocked.one"},{"name":"allowed"},{"name":"blocked.two"}]}})");
+    CHECK(multiple_result.action == mng::process::ServerMessageAction::replace);
+    CHECK(multiple_result.replacement.find("blocked.one") == std::string_view::npos);
+    CHECK(multiple_result.replacement.find("blocked.two") == std::string_view::npos);
+    CHECK(multiple_result.replacement.find(R"("name":"allowed")") != std::string_view::npos);
+
+    auto all_allowed = build_tool_call_filter({"other"});
+    CHECK(all_allowed.inspect(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    const std::string allowed_response =
+        R"({"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"one"},{"name":"two"}]}})";
+    const auto allowed_result = all_allowed.inspect_server(allowed_response);
+    CHECK(allowed_result.action == mng::process::ServerMessageAction::replace);
+    CHECK(allowed_result.replacement == allowed_response);
+
+    auto all_denied = build_tool_call_filter({"one", "two"});
+    CHECK(all_denied.inspect(R"({"jsonrpc":"2.0","id":3,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    const auto denied_result = all_denied.inspect_server(
+        R"({"jsonrpc":"2.0","id":3,"result":{"tools":[{"name":"one"},{"name":"two"}]}})");
+    CHECK(denied_result.action == mng::process::ServerMessageAction::replace);
+    CHECK(denied_result.replacement == R"({"jsonrpc":"2.0","id":3,"result":{"tools":[]}})");
+}
+
+void test_tools_list_filter_reordered_and_unrelated_responses() {
+    auto filter = build_tool_call_filter({"blocked"});
+    const std::string unrelated = R"({"jsonrpc":"2.0","id":20,"result":{"value":true}})";
+    CHECK(filter.inspect_server(unrelated).action == mng::process::ServerMessageAction::forward);
+
+    CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":"known","method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    const std::string unknown =
+        R"({"jsonrpc":"2.0","id":"unknown","result":{"tools":[{"name":"blocked"}]}})";
+    CHECK(filter.inspect_server(unknown).action == mng::process::ServerMessageAction::forward);
+    CHECK(filter.pending_request_count() == 1U);
+
+    const auto reordered = filter.inspect_server(
+        R"({"id":"known","result":{"nextCursor":null,"tools":[{"description":"x","name":"blocked"},{"name":"allowed"}]},"jsonrpc":"2.0"})");
+    CHECK(reordered.action == mng::process::ServerMessageAction::replace);
+    CHECK(reordered.replacement.find("blocked") == std::string_view::npos);
+    CHECK(reordered.replacement.find(R"("name":"allowed")") != std::string_view::npos);
+    CHECK(reordered.replacement.find(R"("nextCursor":null)") != std::string_view::npos);
+    CHECK(filter.pending_request_count() == 0U);
+}
+
+void test_tools_list_filter_string_numeric_ids_and_duplicate_members() {
+    auto ids = build_tool_call_filter({"blocked"});
+    CHECK(ids.inspect(R"({"jsonrpc":"2.0","id":41,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(ids.inspect(R"({"jsonrpc":"2.0","id":"forty-two","method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(ids.pending_request_count() == 2U);
+    CHECK(ids.inspect_server(
+              R"({"jsonrpc":"2.0","id":41,"result":{"tools":[{"name":"allowed"}]}})")
+              .action == mng::process::ServerMessageAction::replace);
+    CHECK(ids.inspect_server(
+              R"({"jsonrpc":"2.0","id":"forty-two","result":{"tools":[{"name":"allowed"}]}})")
+              .action == mng::process::ServerMessageAction::replace);
+
+    auto duplicate_pending = build_tool_call_filter({"blocked"});
+    CHECK(duplicate_pending.inspect(R"({"jsonrpc":"2.0","id":5,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(duplicate_pending.inspect(R"({"jsonrpc":"2.0","id":5,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::drop);
+
+    const auto rejects_response = [](std::string_view response) {
+        auto filter = build_tool_call_filter({"blocked"});
+        CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":7,"method":"tools/list"})").action ==
+              mng::process::ClientMessageAction::forward);
+        CHECK(filter.inspect_server(response).action == mng::process::ServerMessageAction::drop);
+    };
+    rejects_response(
+        R"({"jsonrpc":"2.0","id":7,"id":7,"result":{"tools":[{"name":"allowed"}]}})");
+    rejects_response(
+        R"({"jsonrpc":"2.0","id":7,"result":{"tools":[]},"result":{"tools":[]}})");
+    rejects_response(
+        R"({"jsonrpc":"2.0","id":7,"result":{"tools":[],"tools":[]}})");
+    rejects_response(
+        R"({"jsonrpc":"2.0","id":7,"result":{"tools":[{"name":"a","name":"b"}]}})");
+}
+
+void test_tools_list_filter_rejects_malformed_oversized_and_deep_responses() {
+    auto malformed = build_tool_call_filter({"blocked"});
+    CHECK(malformed.inspect(R"({"jsonrpc":"2.0","id":8,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(malformed.inspect_server(
+              R"({"jsonrpc":"2.0","id":8,"result":{"tools":[{"name":"allowed"}]})")
+              .action == mng::process::ServerMessageAction::drop);
+
+    mng::security::PolicyTable policy;
+    CHECK(mng::security::PolicyTable::build(
+        {}, {mng::security::Access::allow, mng::security::Access::allow}, policy));
+    mng::protocol::ToolCallFilter bounded{std::move(policy), {128U, 4U, 1U, 16U, 16U}};
+    CHECK(bounded.inspect(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    const std::string oversized =
+        R"({"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"allowed","description":")" +
+        std::string(128U, 'x') + R"("}]}})";
+    CHECK(bounded.inspect_server(oversized).action == mng::process::ServerMessageAction::drop);
+
+    auto deep = build_tool_call_filter({"blocked"});
+    CHECK(deep.inspect(R"({"jsonrpc":"2.0","id":9,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    const auto deep_response = deep.inspect_server(
+        R"({"jsonrpc":"2.0","id":9,"result":{"tools":[{"name":"allowed","inputSchema":{"a":{"b":{"c":{"d":{"e":1}}}}}}]}})");
+    CHECK(deep_response.action == mng::process::ServerMessageAction::replace);
+
+    mng::security::PolicyTable shallow_policy;
+    CHECK(mng::security::PolicyTable::build(
+        {}, {mng::security::Access::allow, mng::security::Access::allow}, shallow_policy));
+    mng::protocol::ToolCallFilter shallow{std::move(shallow_policy), {1024U, 5U, 4U, 32U, 64U}};
+    CHECK(shallow.inspect(R"({"jsonrpc":"2.0","id":10,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(shallow.inspect_server(
+              R"({"jsonrpc":"2.0","id":10,"result":{"tools":[{"name":"allowed","inputSchema":{"a":{"b":1}}}]}})")
+              .action == mng::process::ServerMessageAction::drop);
+}
+
+void test_tools_list_pending_capacity_and_cleanup() {
+    mng::security::PolicyTable policy;
+    CHECK(mng::security::PolicyTable::build(
+        {}, {mng::security::Access::allow, mng::security::Access::allow}, policy));
+    mng::protocol::ToolCallFilter filter{std::move(policy), {1024U, 16U, 1U, 8U, 8U}};
+    CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::drop);
+    CHECK(filter.pending_request_count() == 1U);
+    CHECK(filter.inspect_server(R"({"jsonrpc":"2.0","id":1,"result":{"tools":[]}})").action ==
+          mng::process::ServerMessageAction::replace);
+    CHECK(filter.pending_request_count() == 0U);
+    CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    filter.connection_closed();
+    CHECK(filter.pending_request_count() == 0U);
+
+    mng::security::PolicyTable aggregate_policy;
+    CHECK(mng::security::PolicyTable::build(
+        {}, {mng::security::Access::allow, mng::security::Access::allow}, aggregate_policy));
+    mng::protocol::ToolCallFilter aggregate{
+        std::move(aggregate_policy), {1024U, 16U, 4U, 8U, 2U}};
+    CHECK(aggregate.inspect(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(aggregate.inspect(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(aggregate.inspect(R"({"jsonrpc":"2.0","id":3,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::drop);
+}
+
 } // namespace
 
 int main() {
@@ -492,6 +665,12 @@ int main() {
     test_proxy_core_decisions_and_counters();
     test_tool_call_filter_enforces_requests_and_notifications();
     test_tool_call_filter_rejects_invalid_params_and_preserves_other_methods();
+    test_tools_list_filter_removes_denied_tools_and_preserves_fields();
+    test_tools_list_filter_multiple_all_allowed_and_all_denied();
+    test_tools_list_filter_reordered_and_unrelated_responses();
+    test_tools_list_filter_string_numeric_ids_and_duplicate_members();
+    test_tools_list_filter_rejects_malformed_oversized_and_deep_responses();
+    test_tools_list_pending_capacity_and_cleanup();
 
     if (failures != 0) {
         std::cerr << failures << " test check(s) failed\n";

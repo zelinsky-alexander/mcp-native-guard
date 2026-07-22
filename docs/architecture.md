@@ -14,6 +14,7 @@ client stdio
     -> typed JSON-RPC envelope classifier
     -> bounded tools/call parameter extractor
     -> immutable policy snapshot
+    -> correlated tools/list response filter
     -> tool-definition baseline verifier     [next milestone]
     -> Linux downstream process transport
     -> response inspection and audit          [next milestone]
@@ -22,7 +23,8 @@ client stdio
 
 The current Linux path frames client JSONL, classifies JSON-RPC envelopes, extracts `tools/call`
 parameters without a DOM, and applies an immutable in-memory deny policy before forwarding. Server
-stdout is relayed transparently. Other MCP methods are not yet policy-filtered.
+stdout is relayed transparently except for responses correlated to bounded pending `tools/list`
+requests, whose tool arrays are filtered. Other MCP methods are not yet policy-filtered.
 
 ## Invariants
 
@@ -35,6 +37,8 @@ stdout is relayed transparently. Other MCP methods are not yet policy-filtered.
 7. Every future concurrency boundary must define ownership and cancellation behaviour.
 8. A denied `tools/call` request is answered locally with temporary project code `-32001`; a denied
    notification is dropped without a response.
+9. Pending `tools/list` correlations have fixed count, per-ID, and aggregate ID-size bounds and are
+   removed on response or connection close.
 
 ## Hot-path model
 

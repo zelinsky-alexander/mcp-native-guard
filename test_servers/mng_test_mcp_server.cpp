@@ -22,6 +22,8 @@ int main() {
         std::cout << R"({"jsonrpc":"2.0","id":)" << envelope.id_json;
         if (envelope.method == "initialize") {
             std::cout << R"(,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"mng-test-mcp-server","version":"0.1"}}})";
+        } else if (envelope.method == "tools/list") {
+            std::cout << R"(,"result":{"tools":[{"name":"allowed.tool","description":"allowed test tool","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}},{"name":"blocked.one","description":"denied test tool"},{"name":"blocked.two","description":"second denied test tool"}],"nextCursor":null}})";
         } else if (envelope.method == "tools/call") {
             const auto params = extractor.extract(line);
             if (!params) {

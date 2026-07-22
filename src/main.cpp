@@ -31,7 +31,9 @@ void print_help(std::ostream& output) {
            << "  mcp-native-guard run [--deny-tool TOOL_NAME ...] -- <server> [args...]\n\n"
            << "relay is an early framing-path harness. It validates bounded newline-delimited\n"
            << "messages and either forwards them to stdout or discards them for measurement.\n"
-           << "It is not yet the security proxy MVP.\n";
+           << "It is not yet the security proxy MVP.\n\n"
+           << "run launches one Linux stdio server. Each --deny-tool rule blocks invocation\n"
+           << "and hides that tool from correlated tools/list responses.\n";
 }
 
 int run_child(int argc, char** argv) {
@@ -52,7 +54,7 @@ int run_child(int argc, char** argv) {
         }
         rules.push_back({
             std::string{argv[++index]},
-            mng::security::Access::allow,
+            mng::security::Access::deny,
             mng::security::Access::deny,
         });
     }

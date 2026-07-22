@@ -110,6 +110,19 @@ private:
     bool valid_{false};
 };
 
+class HandlerConnectionScope final {
+public:
+    explicit HandlerConnectionScope(ClientMessageHandler* handler) noexcept : handler_{handler} {}
+    ~HandlerConnectionScope() {
+        if (handler_ != nullptr) {
+            handler_->connection_closed();
+        }
+    }
+
+private:
+    ClientMessageHandler* handler_;
+};
+
 [[nodiscard]] bool set_close_on_exec(int descriptor) noexcept {
     const int flags = ::fcntl(descriptor, F_GETFD);
     return flags >= 0 && ::fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC) == 0;
@@ -234,32 +247,7 @@ private:
     return true;
 }
 
-enum class ReadStatus : unsigned char { data, end_of_file, retry, error };
 enum class WriteStatus : unsigned char { data, retry, broken_pipe, error };
-
-[[nodiscard]] ReadStatus append_from(int source, std::vector<char>& buffer) noexcept {
-    const std::size_t available = buffer.capacity() - buffer.size();
-    if (available == 0U) {
-        return ReadStatus::retry;
-    }
-    std::array<char, 64U * 1024U> read_buffer{};
-    const std::size_t read_size = std::min(available, read_buffer.size());
-    const auto result = ::read(source, read_buffer.data(), read_size);
-    if (result > 0) {
-        buffer.insert(
-            buffer.end(),
-            read_buffer.data(),
-            read_buffer.data() + static_cast<std::size_t>(result));
-        return ReadStatus::data;
-    }
-    if (result == 0) {
-        return ReadStatus::end_of_file;
-    }
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-        return ReadStatus::retry;
-    }
-    return ReadStatus::error;
-}
 
 [[nodiscard]] WriteStatus flush_to(
     int destination,
@@ -345,6 +333,7 @@ int run_stdio_child(
     }
 
     termination_signal = 0;
+    HandlerConnectionScope handler_scope{client_message_handler};
     SignalScope signals;
     if (!signals.valid()) {
         std::cerr << "failed to install signal handlers\n";
@@ -377,6 +366,7 @@ int run_stdio_child(
     std::size_t child_begin = 0;
     std::size_t client_begin = 0;
     io::LineFramer client_framer{{config.max_message_bytes, 4096U, false}};
+    io::LineFramer server_framer{{config.max_message_bytes, 4096U, false}};
     bool input_eof = false;
     bool output_eof = false;
     bool child_reaped = false;
@@ -426,7 +416,7 @@ int run_stdio_child(
         if (!input_eof && child.stdin_write && to_child.empty() && to_client.empty()) {
             poll_descriptors[descriptor_count++] = {STDIN_FILENO, POLLIN, 0};
         }
-        if (child.stdout_read && to_client.size() < to_client.capacity()) {
+        if (child.stdout_read && to_client.empty()) {
             poll_descriptors[descriptor_count++] = {child.stdout_read.get(), POLLIN, 0};
         }
         if (child.stdin_write && !to_child.empty()) {
@@ -491,11 +481,40 @@ int run_stdio_child(
                 }
             } else if (child.stdout_read && descriptor.fd == child.stdout_read.get() &&
                        (descriptor.revents & (POLLIN | POLLHUP)) != 0) {
-                const auto read_status = append_from(child.stdout_read.get(), to_client);
-                if (read_status == ReadStatus::end_of_file) {
+                std::array<char, read_chunk_bytes> output{};
+                const auto read_result = ::read(child.stdout_read.get(), output.data(), output.size());
+                if (read_result > 0) {
+                    bool queue_overflow = false;
+                    const auto frame_status = server_framer.feed(
+                        std::span<const char>{output.data(), static_cast<std::size_t>(read_result)},
+                        [&](std::string_view message) {
+                            const ServerMessageDecision decision = client_message_handler == nullptr
+                                ? ServerMessageDecision{}
+                                : client_message_handler->inspect_server(message);
+                            if (decision.action == ServerMessageAction::forward) {
+                                queue_overflow = !append_message(to_client, message) || queue_overflow;
+                            } else if (decision.action == ServerMessageAction::replace) {
+                                queue_overflow =
+                                    !append_message(to_client, decision.replacement) || queue_overflow;
+                            }
+                        });
+                    if (!frame_status) {
+                        std::cerr << "server framing error: " << frame_status.message << '\n';
+                        return 3;
+                    }
+                    if (queue_overflow) {
+                        std::cerr << "bounded relay queue exceeded\n";
+                        return 4;
+                    }
+                } else if (read_result == 0) {
+                    const auto finish_status = server_framer.finish();
+                    if (!finish_status) {
+                        std::cerr << "server framing error: " << finish_status.message << '\n';
+                        return 3;
+                    }
                     child.stdout_read.reset();
                     output_eof = true;
-                } else if (read_status == ReadStatus::error) {
+                } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
                     std::cerr << "downstream stdout read failed: " << std::strerror(errno) << '\n';
                     return 4;
                 }

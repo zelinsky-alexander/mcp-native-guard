@@ -314,11 +314,21 @@ int main(int argc, char** argv) {
     const auto enforcement = run_enforcement_guard(
         argv[1],
         argv[3],
+        "{\"jsonrpc\":\"2.0\",\"id\":\"list-1\",\"method\":\"tools/list\"}\n"
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"allowed.tool\"}}\n"
         "{\"jsonrpc\":\"2.0\",\"id\":\"deny-2\",\"method\":\"tools/call\",\"params\":{\"name\":\"blocked.one\"}}\n"
         "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"blocked.two\"}}\n"
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"initialize\",\"params\":{}}\n");
     success &= check(enforcement.exit_code == 0, "enforcing proxy and child exit cleanly");
+    success &= check(
+        enforcement.output.find(
+            R"({"jsonrpc":"2.0","id":"list-1","result":{"tools":[{"name":"allowed.tool","description":"allowed test tool","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}}],"nextCursor":null}})") !=
+            std::string::npos,
+        "tools/list reaches child and denied tools are hidden");
+    success &= check(
+        enforcement.output.find("denied test tool") == std::string::npos &&
+            enforcement.output.find("second denied test tool") == std::string::npos,
+        "client does not see denied tool definitions");
     success &= check(
         enforcement.output.find(R"({"jsonrpc":"2.0","id":1,"result":{"tool":"allowed.tool"}})") !=
             std::string::npos,
