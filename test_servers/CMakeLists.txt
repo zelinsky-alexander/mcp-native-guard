@@ -1,2 +1,3 @@
 add_executable(mng_test_mcp_server mng_test_mcp_server.cpp)
 target_compile_features(mng_test_mcp_server PRIVATE cxx_std_20)
+target_link_libraries(mng_test_mcp_server PRIVATE mcp_native_guard::core)

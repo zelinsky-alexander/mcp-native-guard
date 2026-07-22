@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mcp_native_guard/process/client_message_handler.hpp"
+
 #include <cstddef>
 #include <span>
 
@@ -8,6 +10,7 @@ namespace mng::process {
 struct RunConfig final {
     std::size_t pipe_capacity_bytes{64U * 1024U};
     std::size_t relay_buffer_bytes{64U * 1024U};
+    std::size_t max_message_bytes{1024U * 1024U};
 };
 
 // Starts one downstream process and transparently relays its JSONL byte stream
@@ -15,6 +18,7 @@ struct RunConfig final {
 // transport layer does not inspect or rewrite protocol messages.
 [[nodiscard]] int run_stdio_child(
     std::span<char* const> command,
+    ClientMessageHandler* client_message_handler = nullptr,
     RunConfig config = {}) noexcept;
 
 } // namespace mng::process

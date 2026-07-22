@@ -1,6 +1,8 @@
 #include "mcp_native_guard/io/line_framer.hpp"
 #if defined(MNG_HAS_LINUX_STDIO_RELAY)
 #include "mcp_native_guard/process/linux_stdio_relay.hpp"
+#include "mcp_native_guard/protocol/tool_call_filter.hpp"
+#include "mcp_native_guard/security/policy.hpp"
 #endif
 
 #include <array>
@@ -9,7 +11,10 @@
 #include <cstdint>
 #include <iostream>
 #include <span>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -23,21 +28,59 @@ void print_help(std::ostream& output) {
            << "  mcp-native-guard --help\n"
            << "  mcp-native-guard --version\n"
            << "  mcp-native-guard relay [--discard] [--max-message-bytes N]\n\n"
-           << "  mcp-native-guard run -- <server> [args...]\n\n"
+           << "  mcp-native-guard run [--deny-tool TOOL_NAME ...] -- <server> [args...]\n\n"
            << "relay is an early framing-path harness. It validates bounded newline-delimited\n"
            << "messages and either forwards them to stdout or discards them for measurement.\n"
            << "It is not yet the security proxy MVP.\n";
 }
 
 int run_child(int argc, char** argv) {
-    if (argc < 4 || std::string_view{argv[2]} != "--") {
-        std::cerr << "usage: mcp-native-guard run -- <server> [args...]\n";
+#if defined(MNG_HAS_LINUX_STDIO_RELAY)
+    std::vector<mng::security::ToolRule> rules;
+    int separator = -1;
+    for (int index = 2; index < argc; ++index) {
+        const std::string_view argument{argv[index]};
+        if (argument == "--") {
+            separator = index;
+            break;
+        }
+        if (argument != "--deny-tool" || index + 1 >= argc ||
+            std::string_view{argv[index + 1]}.empty() || std::string_view{argv[index + 1]} == "--") {
+            std::cerr << "usage: mcp-native-guard run [--deny-tool TOOL_NAME ...] -- "
+                         "<server> [args...]\n";
+            return 2;
+        }
+        rules.push_back({
+            std::string{argv[++index]},
+            mng::security::Access::allow,
+            mng::security::Access::deny,
+        });
+    }
+    if (separator < 0 || separator + 1 >= argc) {
+        std::cerr << "usage: mcp-native-guard run [--deny-tool TOOL_NAME ...] -- "
+                     "<server> [args...]\n";
         return 2;
     }
-#if defined(MNG_HAS_LINUX_STDIO_RELAY)
+
+    mng::security::PolicyTable policy;
+    const auto policy_status = mng::security::PolicyTable::build(
+        std::move(rules),
+        {mng::security::Access::allow, mng::security::Access::allow},
+        policy);
+    if (!policy_status) {
+        std::cerr << "invalid deny rules: " << policy_status.message << '\n';
+        return 2;
+    }
+
+    mng::protocol::ToolCallFilter filter{std::move(policy)};
     return mng::process::run_stdio_child(
-        std::span<char* const>{argv + 3, static_cast<std::size_t>(argc - 3)});
+        std::span<char* const>{
+            argv + separator + 1,
+            static_cast<std::size_t>(argc - separator - 1)},
+        &filter);
 #else
+    (void)argc;
+    (void)argv;
     std::cerr << "run is supported only on Linux\n";
     return 2;
 #endif

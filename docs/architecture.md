@@ -11,17 +11,18 @@ locally launched or remote MCP server. The first supported data path will be new
 ```text
 client stdio
     -> bounded line framer
-    -> strict JSON-RPC and MCP decoder       [next milestone]
+    -> typed JSON-RPC envelope classifier
+    -> bounded tools/call parameter extractor
     -> immutable policy snapshot
     -> tool-definition baseline verifier     [next milestone]
-    -> downstream process transport          [next milestone]
+    -> Linux downstream process transport
     -> response inspection and audit          [next milestone]
     -> client stdio
 ```
 
-The current scaffold implements the bounded framing layer and an allocation-free immutable policy
-lookup path. It intentionally does not pretend that lightweight string scanning is protocol
-validation.
+The current Linux path frames client JSONL, classifies JSON-RPC envelopes, extracts `tools/call`
+parameters without a DOM, and applies an immutable in-memory deny policy before forwarding. Server
+stdout is relayed transparently. Other MCP methods are not yet policy-filtered.
 
 ## Invariants
 
@@ -32,6 +33,8 @@ validation.
 5. Protocol parsing will be authoritative; security decisions will not use substring matching.
 6. Logging and metrics must use stderr or a separate sink and must never corrupt MCP stdout.
 7. Every future concurrency boundary must define ownership and cancellation behaviour.
+8. A denied `tools/call` request is answered locally with temporary project code `-32001`; a denied
+   notification is dropped without a response.
 
 ## Hot-path model
 

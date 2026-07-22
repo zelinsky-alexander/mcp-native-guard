@@ -38,6 +38,7 @@ add_library(mcp_native_guard_core
     src/policy.cpp
     src/proxy_core.cpp
     src/tool_call_extractor.cpp
+    src/tool_call_filter.cpp
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

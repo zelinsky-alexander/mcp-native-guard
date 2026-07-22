@@ -21,6 +21,8 @@ call-time policy enforcement, tool-definition baselines, and an append-only audi
 - Zero-copy delivery for complete messages already present in an input chunk.
 - Immutable sorted tool-policy table with allocation-free lookup.
 - Deterministic policy-decision core with relaxed atomic counters.
+- Linux stdio child supervision with bounded, nonblocking relay buffers.
+- Repeatable command-line deny rules for `tools/call` enforcement.
 - Focused dependency-free tests.
 - Optional dependency-free framing microbenchmark.
 - Debug, sanitizer, and performance CMake presets.
@@ -50,6 +52,26 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"ping"}' \
 
 The `relay` command is only a framing-path harness. It is not the security proxy MVP.
 
+Run a downstream test MCP server while denying selected tools:
+
+```bash
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"allowed.tool"}}' \
+  '{"jsonrpc":"2.0","id":"blocked-2","method":"tools/call","params":{"name":"blocked.tool"}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"initialize","params":{}}' \
+  | ./build/dev-debug/mcp-native-guard run \
+      --deny-tool blocked.tool \
+      -- ./build/dev-debug/test_servers/mng_test_mcp_server
+```
+
+Denied requests are not sent to the child. They currently receive project-specific JSON-RPC error
+code `-32001` with message `Tool call denied by policy`; this code is temporary until the project's
+public error contract is finalized. Denied notifications are silently dropped. Invalid
+`tools/call` parameters with a usable request ID receive `-32602`.
+
+The `run` command accepts in-memory CLI deny rules only. It does not load policy files or filter
+`tools/list` responses.
+
 ## Performance measurement
 
 ```bash
@@ -65,11 +87,10 @@ Results are meaningful only with hardware, compiler, flags, and workload recorde
 
 1. Select and benchmark an authoritative JSON parser under an approved permissive licence.
 2. Implement typed JSON-RPC and MCP request/response validation.
-3. Launch and supervise one downstream stdio MCP server.
-4. Filter denied tools from `tools/list` and enforce `tools/call` independently.
-5. Canonicalize and fingerprint approved tool definitions.
-6. Add an append-only hash-chained audit sink.
-7. Add Windows Job Object and Linux process-control backends.
+3. Filter denied tools from `tools/list` independently of the implemented `tools/call` enforcement.
+4. Canonicalize and fingerprint approved tool definitions.
+5. Add an append-only hash-chained audit sink.
+6. Add Windows Job Object and Linux process-control backends.
 
 ## Engineering principles
 

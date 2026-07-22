@@ -16,5 +16,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             mcp_native_guard_run_integration_tests
             $<TARGET_FILE:mcp-native-guard>
             $<TARGET_FILE:mcp_native_guard_test_echo_server>
+            $<TARGET_FILE:mng_test_mcp_server>
     )
 endif()

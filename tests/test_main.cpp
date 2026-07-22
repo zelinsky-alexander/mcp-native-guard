@@ -1,6 +1,7 @@
 #include "mcp_native_guard/io/line_framer.hpp"
 #include "mcp_native_guard/protocol/json_rpc_envelope.hpp"
 #include "mcp_native_guard/protocol/tool_call_extractor.hpp"
+#include "mcp_native_guard/protocol/tool_call_filter.hpp"
 #include "mcp_native_guard/proxy/proxy_core.hpp"
 #include "mcp_native_guard/security/policy.hpp"
 
@@ -76,11 +77,16 @@ void test_line_framer_detects_truncation() {
 void test_json_rpc_envelope_classifies_request_notification_and_response() {
     mng::protocol::JsonRpcEnvelopeClassifier classifier;
 
-    const auto request = classifier.classify(
-        R"({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"demo.read"}})");
+    const std::string request_message =
+        R"({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"demo.read"}})";
+    const auto request = classifier.classify(request_message);
     CHECK(request);
     CHECK(request.kind == mng::protocol::EnvelopeKind::request);
     CHECK(request.id_kind == mng::protocol::IdKind::number);
+    CHECK(request.id_json == "7");
+    CHECK(request.id_json.data() >= request_message.data());
+    CHECK(request.id_json.data() + request.id_json.size() <=
+          request_message.data() + request_message.size());
     CHECK(request.method == "tools/call");
 
     const auto notification = classifier.classify(
@@ -88,12 +94,30 @@ void test_json_rpc_envelope_classifies_request_notification_and_response() {
     CHECK(notification);
     CHECK(notification.kind == mng::protocol::EnvelopeKind::notification);
     CHECK(notification.id_kind == mng::protocol::IdKind::absent);
+    CHECK(notification.id_json.empty());
+
+    const auto string_request = classifier.classify(
+        R"({"jsonrpc":"2.0","id":"abc","method":"ping"})");
+    CHECK(string_request);
+    CHECK(string_request.kind == mng::protocol::EnvelopeKind::request);
+    CHECK(string_request.id_kind == mng::protocol::IdKind::string);
+    CHECK(string_request.id_json == R"("abc")");
 
     const auto response = classifier.classify(
-        R"({"jsonrpc":"2.0","id":"abc","result":{"items":[true,null]}})");
+        R"({"jsonrpc":"2.0","id":12,"result":{"items":[true,null]}})");
     CHECK(response);
     CHECK(response.kind == mng::protocol::EnvelopeKind::response);
-    CHECK(response.id_kind == mng::protocol::IdKind::string);
+    CHECK(response.id_kind == mng::protocol::IdKind::number);
+    CHECK(response.id_json == "12");
+}
+
+void test_json_rpc_envelope_extracts_null_id() {
+    mng::protocol::JsonRpcEnvelopeClassifier classifier;
+    const auto request = classifier.classify(
+        R"({"jsonrpc":"2.0","id":null,"method":"tools/call","params":{"name":"demo"}})");
+    CHECK(request);
+    CHECK(request.id_kind == mng::protocol::IdKind::null_value);
+    CHECK(request.id_json == "null");
 }
 
 void test_json_rpc_envelope_rejects_ambiguous_or_malformed_input() {
@@ -375,6 +399,68 @@ void test_proxy_core_decisions_and_counters() {
     CHECK(counters.oversized == 1U);
 }
 
+mng::protocol::ToolCallFilter build_tool_call_filter(std::vector<std::string> denied_tools) {
+    std::vector<mng::security::ToolRule> rules;
+    rules.reserve(denied_tools.size());
+    for (std::string& name : denied_tools) {
+        rules.push_back({
+            std::move(name),
+            mng::security::Access::allow,
+            mng::security::Access::deny,
+        });
+    }
+    mng::security::PolicyTable policy;
+    const auto status = mng::security::PolicyTable::build(
+        std::move(rules),
+        {mng::security::Access::allow, mng::security::Access::allow},
+        policy);
+    CHECK(status);
+    return mng::protocol::ToolCallFilter{std::move(policy)};
+}
+
+void test_tool_call_filter_enforces_requests_and_notifications() {
+    auto filter = build_tool_call_filter({"blocked.one", "blocked.two"});
+
+    const auto denied_request = filter.inspect(
+        R"({"jsonrpc":"2.0","id":"req-7","method":"tools/call","params":{"name":"blocked.one"}})");
+    CHECK(denied_request.action == mng::process::ClientMessageAction::respond_with_error);
+    CHECK(denied_request.id_json == R"("req-7")");
+    CHECK(denied_request.error_code == -32001);
+    CHECK(denied_request.error_message == "Tool call denied by policy");
+
+    const auto denied_notification = filter.inspect(
+        R"({"jsonrpc":"2.0","method":"tools/call","params":{"name":"blocked.two"}})");
+    CHECK(denied_notification.action == mng::process::ClientMessageAction::drop);
+
+    const auto allowed_request = filter.inspect(
+        R"({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"allowed.tool"}})");
+    CHECK(allowed_request.action == mng::process::ClientMessageAction::forward);
+}
+
+void test_tool_call_filter_rejects_invalid_params_and_preserves_other_methods() {
+    auto filter = build_tool_call_filter({"blocked"});
+
+    const auto invalid = filter.inspect(
+        R"({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"arguments":{}}})");
+    CHECK(invalid.action == mng::process::ClientMessageAction::respond_with_error);
+    CHECK(invalid.id_json == "9");
+    CHECK(invalid.error_code == -32602);
+    CHECK(invalid.error_message == "Invalid tools/call parameters");
+
+    const auto passthrough = filter.inspect(
+        R"({"jsonrpc":"2.0","id":10,"method":"initialize","params":{}})");
+    CHECK(passthrough.action == mng::process::ClientMessageAction::forward);
+
+    const auto malformed = filter.inspect(
+        R"({"jsonrpc":"2.0","id":11,"method":"tools/call","params":)");
+    CHECK(malformed.action == mng::process::ClientMessageAction::respond_with_error);
+    CHECK(malformed.id_json == "11");
+    CHECK(malformed.error_code == -32602);
+
+    const auto unusable = filter.inspect(R"({"jsonrpc":"2.0","method":"tools/call","params":)");
+    CHECK(unusable.action == mng::process::ClientMessageAction::drop);
+}
+
 } // namespace
 
 int main() {
@@ -383,6 +469,7 @@ int main() {
     test_line_framer_rejects_oversized_message();
     test_line_framer_detects_truncation();
     test_json_rpc_envelope_classifies_request_notification_and_response();
+    test_json_rpc_envelope_extracts_null_id();
     test_json_rpc_envelope_rejects_ambiguous_or_malformed_input();
     test_json_rpc_envelope_respects_input_limit();
     test_json_rpc_envelope_respects_nesting_limit();
@@ -403,6 +490,8 @@ int main() {
     test_policy_lookup();
     test_policy_rejects_duplicates();
     test_proxy_core_decisions_and_counters();
+    test_tool_call_filter_enforces_requests_and_notifications();
+    test_tool_call_filter_rejects_invalid_params_and_preserves_other_methods();
 
     if (failures != 0) {
         std::cerr << failures << " test check(s) failed\n";

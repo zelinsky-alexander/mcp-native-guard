@@ -149,6 +149,62 @@ struct RunResult final {
     return result;
 }
 
+[[nodiscard]] RunResult run_enforcement_guard(
+    const char* guard_path,
+    const char* server_path,
+    std::string_view input) {
+    FileDescriptor parent_input_read;
+    FileDescriptor child_input_write;
+    FileDescriptor child_output_read;
+    FileDescriptor parent_output_write;
+    FileDescriptor child_error_read;
+    FileDescriptor parent_error_write;
+    if (!make_pipe(parent_input_read, child_input_write) ||
+        !make_pipe(child_output_read, parent_output_write) ||
+        !make_pipe(child_error_read, parent_error_write)) {
+        return {};
+    }
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        return {};
+    }
+    if (pid == 0) {
+        (void)::dup2(parent_input_read.value, STDIN_FILENO);
+        (void)::dup2(parent_output_write.value, STDOUT_FILENO);
+        (void)::dup2(parent_error_write.value, STDERR_FILENO);
+        char* arguments[] = {
+            const_cast<char*>(guard_path),
+            const_cast<char*>("run"),
+            const_cast<char*>("--deny-tool"),
+            const_cast<char*>("blocked.one"),
+            const_cast<char*>("--deny-tool"),
+            const_cast<char*>("blocked.two"),
+            const_cast<char*>("--"),
+            const_cast<char*>(server_path),
+            nullptr,
+        };
+        ::execv(guard_path, arguments);
+        _exit(127);
+    }
+
+    parent_input_read = {};
+    parent_output_write = {};
+    parent_error_write = {};
+    RunResult result;
+    if (!write_all(child_input_write.value, input)) {
+        return result;
+    }
+    child_input_write = {};
+    result.output = read_all(child_output_read);
+    result.error = read_all(child_error_read);
+    int status = 1;
+    if (::waitpid(pid, &status, 0) == pid && WIFEXITED(status)) {
+        result.exit_code = WEXITSTATUS(status);
+    }
+    return result;
+}
+
 [[nodiscard]] bool check(bool condition, std::string_view description) {
     if (!condition) {
         std::cerr << "check failed: " << description << '\n';
@@ -231,7 +287,7 @@ struct RunResult final {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
+    if (argc != 4) {
         return 2;
     }
 
@@ -254,6 +310,33 @@ int main(int argc, char** argv) {
     success &= check(early_exit.output.empty(), "early child exit produces no MCP stdout");
     success &= check(test_invalid_run_command(argv[1]), "invalid run command is rejected");
     success &= check(test_termination(argv[1], argv[2]), "termination escalates without hanging");
+
+    const auto enforcement = run_enforcement_guard(
+        argv[1],
+        argv[3],
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"allowed.tool\"}}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":\"deny-2\",\"method\":\"tools/call\",\"params\":{\"name\":\"blocked.one\"}}\n"
+        "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"blocked.two\"}}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"initialize\",\"params\":{}}\n");
+    success &= check(enforcement.exit_code == 0, "enforcing proxy and child exit cleanly");
+    success &= check(
+        enforcement.output.find(R"({"jsonrpc":"2.0","id":1,"result":{"tool":"allowed.tool"}})") !=
+            std::string::npos,
+        "allowed tool call reaches downstream server");
+    success &= check(
+        enforcement.output.find(
+            R"({"jsonrpc":"2.0","id":"deny-2","error":{"code":-32001,"message":"Tool call denied by policy"}})") !=
+            std::string::npos,
+        "denied request receives policy error with original id");
+    success &= check(
+        enforcement.output.find(R"("tool":"blocked.one")") == std::string::npos &&
+            enforcement.output.find(R"("tool":"blocked.two")") == std::string::npos,
+        "denied calls do not reach downstream server");
+    success &= check(
+        enforcement.output.find(
+            R"({"jsonrpc":"2.0","id":3,"result":{"protocolVersion":"2025-11-25")") !=
+            std::string::npos,
+        "ordinary MCP traffic passes through");
 
     return success ? 0 : 1;
 }

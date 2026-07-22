@@ -1,8 +1,11 @@
 #include "mcp_native_guard/process/linux_stdio_relay.hpp"
 
+#include "mcp_native_guard/io/line_framer.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <climits>
 #include <csignal>
@@ -25,6 +28,7 @@ namespace {
 
 constexpr int poll_timeout_milliseconds = 50;
 constexpr auto termination_grace_period = std::chrono::seconds{1};
+constexpr std::size_t read_chunk_bytes = 64U * 1024U;
 
 volatile std::sig_atomic_t termination_signal = 0;
 
@@ -284,6 +288,38 @@ enum class WriteStatus : unsigned char { data, retry, broken_pipe, error };
     return WriteStatus::error;
 }
 
+[[nodiscard]] bool append_bytes(std::vector<char>& output, std::string_view value) {
+    if (value.size() > output.capacity() - output.size()) {
+        return false;
+    }
+    output.insert(output.end(), value.begin(), value.end());
+    return true;
+}
+
+[[nodiscard]] bool append_message(std::vector<char>& output, std::string_view message) {
+    return append_bytes(output, message) && append_bytes(output, "\n");
+}
+
+[[nodiscard]] bool append_json_rpc_error(
+    std::vector<char>& output,
+    const ClientMessageDecision& decision) {
+    std::array<char, 16> code_buffer{};
+    const auto code = std::to_chars(
+        code_buffer.data(), code_buffer.data() + code_buffer.size(), decision.error_code);
+    if (code.ec != std::errc{}) {
+        return false;
+    }
+
+    return append_bytes(output, R"({"jsonrpc":"2.0","id":)") &&
+           append_bytes(output, decision.id_json) &&
+           append_bytes(output, R"(,"error":{"code":)") &&
+           append_bytes(
+               output,
+               std::string_view{code_buffer.data(), static_cast<std::size_t>(code.ptr - code_buffer.data())}) &&
+           append_bytes(output, R"(,"message":")") &&
+           append_bytes(output, decision.error_message) && append_bytes(output, "\"}}\n");
+}
+
 [[nodiscard]] int exit_code_from_status(int status) noexcept {
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
@@ -296,8 +332,14 @@ enum class WriteStatus : unsigned char { data, retry, broken_pipe, error };
 
 } // namespace
 
-int run_stdio_child(std::span<char* const> command, RunConfig config) noexcept {
-    if (command.empty() || command.front() == nullptr || config.relay_buffer_bytes == 0U) {
+int run_stdio_child(
+    std::span<char* const> command,
+    ClientMessageHandler* client_message_handler,
+    RunConfig config) noexcept {
+    constexpr std::size_t response_expansion_bytes = 4U * read_chunk_bytes + 512U;
+    if (command.empty() || command.front() == nullptr || config.relay_buffer_bytes == 0U ||
+        config.max_message_bytes == 0U ||
+        config.max_message_bytes > static_cast<std::size_t>(-1) - response_expansion_bytes) {
         std::cerr << "invalid run configuration\n";
         return 2;
     }
@@ -324,14 +366,17 @@ int run_stdio_child(std::span<char* const> command, RunConfig config) noexcept {
     std::vector<char> to_child;
     std::vector<char> to_client;
     try {
-        to_child.reserve(config.relay_buffer_bytes);
-        to_client.reserve(config.relay_buffer_bytes);
+        const std::size_t client_queue_bytes = config.max_message_bytes + read_chunk_bytes + 1U;
+        const std::size_t server_queue_bytes = config.max_message_bytes + response_expansion_bytes;
+        to_child.reserve(std::max(config.relay_buffer_bytes, client_queue_bytes));
+        to_client.reserve(std::max(config.relay_buffer_bytes, server_queue_bytes));
     } catch (...) {
         std::cerr << "failed to allocate relay buffers\n";
         return 4;
     }
     std::size_t child_begin = 0;
     std::size_t client_begin = 0;
+    io::LineFramer client_framer{{config.max_message_bytes, 4096U, false}};
     bool input_eof = false;
     bool output_eof = false;
     bool child_reaped = false;
@@ -378,7 +423,7 @@ int run_stdio_child(std::span<char* const> command, RunConfig config) noexcept {
 
         std::array<pollfd, 4> poll_descriptors{};
         nfds_t descriptor_count = 0;
-        if (!input_eof && child.stdin_write && to_child.size() < to_child.capacity()) {
+        if (!input_eof && child.stdin_write && to_child.empty() && to_client.empty()) {
             poll_descriptors[descriptor_count++] = {STDIN_FILENO, POLLIN, 0};
         }
         if (child.stdout_read && to_client.size() < to_client.capacity()) {
@@ -409,10 +454,38 @@ int run_stdio_child(std::span<char* const> command, RunConfig config) noexcept {
                 continue;
             }
             if (descriptor.fd == STDIN_FILENO && (descriptor.revents & (POLLIN | POLLHUP)) != 0) {
-                const auto read_status = append_from(STDIN_FILENO, to_child);
-                if (read_status == ReadStatus::end_of_file) {
+                std::array<char, read_chunk_bytes> input{};
+                const auto read_result = ::read(STDIN_FILENO, input.data(), input.size());
+                if (read_result > 0) {
+                    bool queue_overflow = false;
+                    const auto frame_status = client_framer.feed(
+                        std::span<const char>{input.data(), static_cast<std::size_t>(read_result)},
+                        [&](std::string_view message) {
+                            const ClientMessageDecision decision = client_message_handler == nullptr
+                                ? ClientMessageDecision{}
+                                : client_message_handler->inspect(message);
+                            if (decision.action == ClientMessageAction::forward) {
+                                queue_overflow = !append_message(to_child, message) || queue_overflow;
+                            } else if (decision.action == ClientMessageAction::respond_with_error) {
+                                queue_overflow = !append_json_rpc_error(to_client, decision) || queue_overflow;
+                            }
+                        });
+                    if (!frame_status) {
+                        std::cerr << "client framing error: " << frame_status.message << '\n';
+                        return 3;
+                    }
+                    if (queue_overflow) {
+                        std::cerr << "bounded relay queue exceeded\n";
+                        return 4;
+                    }
+                } else if (read_result == 0) {
+                    const auto finish_status = client_framer.finish();
+                    if (!finish_status) {
+                        std::cerr << "client framing error: " << finish_status.message << '\n';
+                        return 3;
+                    }
                     input_eof = true;
-                } else if (read_status == ReadStatus::error) {
+                } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
                     std::cerr << "stdin read failed: " << std::strerror(errno) << '\n';
                     return 4;
                 }

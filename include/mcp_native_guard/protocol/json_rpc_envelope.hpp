@@ -32,6 +32,11 @@ enum class ClassificationError : std::uint8_t {
 struct Envelope final {
     EnvelopeKind kind{EnvelopeKind::invalid};
     IdKind id_kind{IdKind::absent};
+    // Raw JSON token for id, including string quotes when present. It aliases
+    // the classified input and is empty when the id member was not usable.
+    // A rejected envelope may retain fields scanned before the error so a
+    // caller can fail closed with the original request ID.
+    std::string_view id_json{};
     std::string_view method{};
     ClassificationError error{ClassificationError::none};
 
