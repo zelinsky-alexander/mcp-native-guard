@@ -3,7 +3,7 @@
 A modern C++ security boundary for Model Context Protocol traffic, designed for bounded resource use,
 low overhead, and native endpoint enforcement.
 
-> **Status:** early functional Linux prototype; not production hardened.
+> **Status:** early functional Linux prototype; not production hardened. Linux `run` support is functional for local stdio child processes, but this project is not ready to serve as a production security boundary.
 
 ## Why this project exists
 
@@ -45,6 +45,13 @@ cmake --build --preset dev-debug
 ctest --preset dev-debug
 ```
 
+Clean Release build command:
+
+```bash
+cmake --preset release
+cmake --build --preset release
+```
+
 Run the early framing harness:
 
 ```bash
@@ -52,7 +59,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"ping"}' \
   | ./build/dev-debug/mcp-native-guard relay
 ```
 
-The `relay` command is only a framing-path harness. It is not the security proxy MVP.
+The `relay` command is only a framing-path harness. It is not the security proxy MVP. The `run` proxy is currently Linux-only; Windows process isolation is not implemented.
 
 Run a downstream test MCP server with a local policy and an optional command-line deny override:
 
@@ -84,7 +91,7 @@ printf '%s\n' \
 
 Use `--audit-stderr` instead to emit the same compact JSONL records on stderr. Audit is disabled by
 default, and `--audit-file` and `--audit-stderr` cannot be combined. Audit output never uses stdout
-and never includes tool arguments or complete JSON-RPC messages. Audit files are opened in append
+and never includes tool arguments or complete JSON-RPC messages; records may still include tool names, raw request IDs, timestamps, and message sizes. Audit files are opened in append
 mode before the child starts. If a runtime audit write fails, the proxy reports the failure once on
 stderr, disables later audit writes, and continues enforcing policy.
 
@@ -108,7 +115,7 @@ Policy format version 1 uses explicit defaults and per-tool visibility/invocatio
 ```
 
 The file is read and parsed once, before the downstream process starts. Tool names containing JSON
-escapes are rejected in this version; write tool names as unescaped JSON strings. Repeated
+escapes are rejected in this version, including escaped names in policy files and security-relevant protocol fields; write tool names as unescaped JSON strings. Repeated
 `--deny-tool NAME` options are applied after file loading and deny both visibility and invocation.
 
 Denied requests are not sent to the child. They currently receive project-specific JSON-RPC error
@@ -138,6 +145,27 @@ Audit records cover allowed, denied, and invalid `tools/call` messages; removed 
 definitions; oversized messages; and pending-correlation capacity exhaustion. Each record includes
 a UTC timestamp, event, decision, reason, and only the applicable tool name, raw request ID, and
 encoded message size.
+
+## Compatibility limits for 0.1
+
+- Runtime proxy support is Linux-only for local stdio child processes.
+- Stdio framing assumes one complete JSON-RPC message per newline (JSONL); HTTP-style `Content-Length` framing is not supported.
+- Denied `tools/call` requests currently use temporary JSON-RPC error code `-32001`.
+- Exhausted `tools/list` correlation capacity currently uses temporary JSON-RPC error code `-32002`.
+- Escaped tool names in security-relevant JSON strings are rejected in this version.
+- Audit records omit full arguments and full JSON-RPC payloads but may include tool names, request IDs, timestamps, and message sizes.
+- Runtime defaults are `--max-message-bytes 1048576`, `--max-nesting-depth 64`, and `--max-pending-tools-list 64`.
+- HTTP transports, OAuth, TLS termination, Windows process isolation, policy hot reload, wildcard rules, dashboards, metrics, and log rotation are not implemented.
+
+## Real MCP server smoke test
+
+A repeatable external smoke harness is available for JSONL-compatible Linux stdio MCP servers:
+
+```bash
+scripts/smoke_real_mcp.sh -- npx -y @modelcontextprotocol/server-filesystem@2026.7.10 {sandbox}
+```
+
+See [`docs/real-mcp-smoke-test.md`](docs/real-mcp-smoke-test.md).
 
 ## Performance measurement
 
