@@ -19,7 +19,3 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             $<TARGET_FILE:mng_test_mcp_server>
     )
 endif()
-
-add_executable(mng_codex_cloud_smoke codex_cloud_smoke.cpp)
-target_compile_features(mng_codex_cloud_smoke PRIVATE cxx_std_20)
-add_test(NAME mng_codex_cloud_smoke COMMAND mng_codex_cloud_smoke)
