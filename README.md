@@ -3,7 +3,7 @@
 A modern C++ security boundary for Model Context Protocol traffic, designed for bounded resource use,
 low overhead, and native endpoint enforcement.
 
-> **Status:** architectural scaffold. This repository does not yet implement a production MCP proxy.
+> **Status:** early functional Linux prototype; not production hardened.
 
 ## Why this project exists
 
@@ -65,6 +65,9 @@ printf '%s\n' \
   | ./build/dev-debug/mcp-native-guard run \
       --policy examples/policy.json \
       --deny-tool blocked.tool \
+      --max-message-bytes 1048576 \
+      --max-nesting-depth 64 \
+      --max-pending-tools-list 64 \
       -- ./build/dev-debug/test_servers/mng_test_mcp_server
 ```
 
@@ -115,6 +118,21 @@ public error contract is finalized. Denied notifications are silently dropped. I
 
 The proxy correlates bounded outstanding `tools/list` requests with server responses and removes
 denied tool definitions while preserving unrelated response fields and allowed definitions.
+
+The `run` command accepts configurable runtime security limits:
+
+- `--max-message-bytes N` bounds each newline-delimited MCP message in both directions; default: `1048576`.
+- `--max-nesting-depth N` bounds security-relevant runtime JSON scanners and extractors; default: `64`.
+- `--max-pending-tools-list N` bounds outstanding `tools/list` request/response correlations; default: `64`.
+
+Numeric limit values must be unsigned nonzero decimal integers. Malformed values, signed-looking
+values, overflow, and duplicate occurrences of the same limit option are rejected at startup.
+
+When the `tools/list` correlation table is full, the proxy does not forward another untrackable
+request. Requests with a usable ID receive compact JSON-RPC error code `-32002`; this
+project-specific code is temporary until the project's public runtime-limit error contract is
+finalized. Notifications or messages without a usable ID are dropped. If audit is enabled, the
+proxy emits a resource-limit audit record and remains available for later traffic.
 
 Audit records cover allowed, denied, and invalid `tools/call` messages; removed `tools/list`
 definitions; oversized messages; and pending-correlation capacity exhaustion. Each record includes

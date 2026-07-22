@@ -3,6 +3,7 @@
 #include "mcp_native_guard/audit/audit_sink.hpp"
 #include "mcp_native_guard/process/linux_stdio_relay.hpp"
 #include "mcp_native_guard/protocol/tool_call_filter.hpp"
+#include "mcp_native_guard/protocol/runtime_limits.hpp"
 #include "mcp_native_guard/security/policy.hpp"
 #include "mcp_native_guard/security/policy_loader.hpp"
 #endif
@@ -33,19 +34,41 @@ void print_help(std::ostream& output) {
            << "  mcp-native-guard --version\n"
            << "  mcp-native-guard relay [--discard] [--max-message-bytes N]\n\n"
            << "  mcp-native-guard run [--policy FILE] [--deny-tool TOOL_NAME ...]\n"
-           << "      [--audit-file PATH | --audit-stderr] --\n"
+           << "      [--max-message-bytes N] [--max-nesting-depth N]\n"
+           << "      [--max-pending-tools-list N] [--audit-file PATH | --audit-stderr] --\n"
            << "      <server> [args...]\n\n"
            << "relay is an early framing-path harness. It validates bounded newline-delimited\n"
            << "messages and either forwards them to stdout or discards them for measurement.\n"
            << "It is not yet the security proxy MVP.\n\n"
            << "run loads an optional bounded JSON policy before launching one Linux stdio server.\n"
            << "Each --deny-tool rule overrides the file policy to deny invocation and visibility.\n"
-           << "Audit JSONL is disabled by default and is never written to MCP stdout.\n";
+           << "Audit JSONL is disabled by default and is never written to MCP stdout.\n"
+           << "Runtime limit defaults: max-message-bytes=1048576, max-nesting-depth=64, "
+           << "max-pending-tools-list=64.\n";
+}
+
+
+bool parse_bounded_integer(std::string_view text, std::size_t& value) {
+    if (text.empty()) {
+        return false;
+    }
+    for (const char c : text) {
+        if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    const char* const begin = text.data();
+    const char* const end = begin + text.size();
+    value = 0;
+    const auto result = std::from_chars(begin, end, value);
+    return result.ec == std::errc{} && result.ptr == end && value != 0U;
 }
 
 void print_run_usage(std::ostream& output) {
     output << "usage: mcp-native-guard run [--policy FILE] [--deny-tool TOOL_NAME ...] "
-              "[--audit-file PATH | --audit-stderr] -- <server> [args...]\n";
+              "[--max-message-bytes N] [--max-nesting-depth N] "
+              "[--max-pending-tools-list N] [--audit-file PATH | --audit-stderr] -- "
+              "<server> [args...]\n";
 }
 
 int run_child(int argc, char** argv) {
@@ -53,7 +76,11 @@ int run_child(int argc, char** argv) {
     std::vector<std::string> denied_tools;
     std::string_view policy_path;
     std::string_view audit_file_path;
+    mng::protocol::RuntimeLimits runtime_limits;
     bool audit_stderr = false;
+    bool saw_max_message_bytes = false;
+    bool saw_max_nesting_depth = false;
+    bool saw_max_pending_tools_list = false;
     int separator = -1;
     for (int index = 2; index < argc; ++index) {
         const std::string_view argument{argv[index]};
@@ -87,6 +114,36 @@ int run_child(int argc, char** argv) {
                 return 2;
             }
             audit_stderr = true;
+            continue;
+        }
+        if (argument == "--max-message-bytes") {
+            if (saw_max_message_bytes || index + 1 >= argc ||
+                !parse_bounded_integer(argv[index + 1], runtime_limits.max_message_bytes)) {
+                print_run_usage(std::cerr);
+                return 2;
+            }
+            saw_max_message_bytes = true;
+            ++index;
+            continue;
+        }
+        if (argument == "--max-nesting-depth") {
+            if (saw_max_nesting_depth || index + 1 >= argc ||
+                !parse_bounded_integer(argv[index + 1], runtime_limits.max_nesting_depth)) {
+                print_run_usage(std::cerr);
+                return 2;
+            }
+            saw_max_nesting_depth = true;
+            ++index;
+            continue;
+        }
+        if (argument == "--max-pending-tools-list") {
+            if (saw_max_pending_tools_list || index + 1 >= argc ||
+                !parse_bounded_integer(argv[index + 1], runtime_limits.max_pending_tools_list)) {
+                print_run_usage(std::cerr);
+                return 2;
+            }
+            saw_max_pending_tools_list = true;
+            ++index;
             continue;
         }
         if (argument != "--deny-tool" || index + 1 >= argc ||
@@ -146,12 +203,15 @@ int run_child(int argc, char** argv) {
     }
 
     mng::protocol::ToolCallFilter filter{
-        std::move(policy), audit_sink ? &*audit_sink : nullptr};
+        std::move(policy), {runtime_limits}, audit_sink ? &*audit_sink : nullptr};
+    mng::process::RunConfig run_config;
+    run_config.runtime = runtime_limits;
     return mng::process::run_stdio_child(
         std::span<char* const>{
             argv + separator + 1,
             static_cast<std::size_t>(argc - separator - 1)},
-        &filter);
+        &filter,
+        run_config);
 #else
     (void)argc;
     (void)argv;
@@ -161,13 +221,7 @@ int run_child(int argc, char** argv) {
 }
 
 bool parse_size(std::string_view text, std::size_t& value) {
-    if (text.empty()) {
-        return false;
-    }
-    const char* const begin = text.data();
-    const char* const end = begin + text.size();
-    const auto result = std::from_chars(begin, end, value);
-    return result.ec == std::errc{} && result.ptr == end && value != 0U;
+    return parse_bounded_integer(text, value);
 }
 
 int run_relay(int argc, char** argv) {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mcp_native_guard/protocol/runtime_limits.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -51,10 +53,7 @@ struct Envelope final {
 // canonical slices of the input.
 class JsonRpcEnvelopeClassifier final {
 public:
-    struct Config final {
-        std::size_t max_message_bytes{1024U * 1024U};
-        std::size_t max_nesting_depth{64U};
-    };
+    using Config = RuntimeLimits;
 
     JsonRpcEnvelopeClassifier();
     explicit JsonRpcEnvelopeClassifier(Config config) noexcept;

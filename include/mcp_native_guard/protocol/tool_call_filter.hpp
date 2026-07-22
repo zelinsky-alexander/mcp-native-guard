@@ -4,11 +4,12 @@
 #include "mcp_native_guard/process/client_message_handler.hpp"
 #include "mcp_native_guard/protocol/json_rpc_envelope.hpp"
 #include "mcp_native_guard/protocol/tool_call_extractor.hpp"
+#include "mcp_native_guard/protocol/runtime_limits.hpp"
 #include "mcp_native_guard/proxy/proxy_core.hpp"
 
-#include <array>
 #include <cstddef>
 #include <string>
+#include <vector>
 
 namespace mng::protocol {
 
@@ -18,20 +19,18 @@ namespace mng::protocol {
 class ToolCallFilter final : public process::ClientMessageHandler {
 public:
     struct Config final {
-        std::size_t max_message_bytes{1024U * 1024U};
-        std::size_t max_nesting_depth{64U};
-        std::size_t max_pending_requests{64U};
+        RuntimeLimits runtime{};
         std::size_t max_pending_id_bytes{4096U};
         std::size_t max_pending_total_id_bytes{16U * 1024U};
     };
 
     explicit ToolCallFilter(
         security::PolicyTable policy,
-        audit::AuditSink* audit_sink = nullptr) noexcept;
+        audit::AuditSink* audit_sink = nullptr);
     ToolCallFilter(
         security::PolicyTable policy,
         Config config,
-        audit::AuditSink* audit_sink = nullptr) noexcept;
+        audit::AuditSink* audit_sink = nullptr);
 
     [[nodiscard]] process::ClientMessageDecision inspect(std::string_view message) noexcept override;
     [[nodiscard]] process::ServerMessageDecision inspect_server(std::string_view message) noexcept override;
@@ -43,8 +42,6 @@ public:
     [[nodiscard]] std::size_t pending_request_count() const noexcept { return pending_count_; }
 
 private:
-    static constexpr std::size_t pending_storage_capacity = 64U;
-
     enum class PendingStatus : unsigned char { added, duplicate, capacity_exhausted };
     struct PendingRequest final { std::string id_json; };
 
@@ -55,7 +52,7 @@ private:
     ToolCallExtractor extractor_;
     proxy::ProxyCore proxy_;
     Config config_;
-    std::array<PendingRequest, pending_storage_capacity> pending_{};
+    std::vector<PendingRequest> pending_;
     std::size_t pending_count_{0};
     std::size_t pending_id_bytes_{0};
     std::string rewritten_response_;

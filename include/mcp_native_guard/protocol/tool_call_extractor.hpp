@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mcp_native_guard/protocol/runtime_limits.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -55,10 +57,7 @@ struct ToolCallParams final {
 //  - No JSON value tree is built.
 class ToolCallExtractor final {
 public:
-    struct Config final {
-        std::size_t max_message_bytes{1024U * 1024U};
-        std::size_t max_nesting_depth{64U};
-    };
+    using Config = RuntimeLimits;
 
     ToolCallExtractor();
     explicit ToolCallExtractor(Config config) noexcept;

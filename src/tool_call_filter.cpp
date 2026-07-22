@@ -12,8 +12,11 @@ namespace {
 
 constexpr int denied_tool_error_code = -32001;
 constexpr int invalid_params_error_code = -32602;
+// Temporary project-specific code until the public runtime-limit error contract is finalized.
+constexpr int correlation_capacity_error_code = -32002;
 constexpr std::string_view denied_tool_error_message = "Tool call denied by policy";
 constexpr std::string_view invalid_params_error_message = "Invalid tools/call parameters";
+constexpr std::string_view correlation_capacity_error_message = "tools/list correlation capacity exhausted";
 
 using internal::StringToken;
 using internal::scan_string;
@@ -259,17 +262,18 @@ enum class RewriteStatus : unsigned char { rewritten, passthrough, malformed };
 
 ToolCallFilter::ToolCallFilter(
     security::PolicyTable policy,
-    audit::AuditSink* audit_sink) noexcept
+    audit::AuditSink* audit_sink)
     : ToolCallFilter(std::move(policy), Config{}, audit_sink) {}
 
 ToolCallFilter::ToolCallFilter(
     security::PolicyTable policy,
     Config config,
-    audit::AuditSink* audit_sink) noexcept
-    : classifier_{{config.max_message_bytes, config.max_nesting_depth}},
-      extractor_{{config.max_message_bytes, config.max_nesting_depth}},
-      proxy_{std::move(policy), {config.max_message_bytes}},
+    audit::AuditSink* audit_sink)
+    : classifier_{config.runtime},
+      extractor_{config.runtime},
+      proxy_{std::move(policy), {config.runtime.max_message_bytes}},
       config_{config},
+      pending_(config.runtime.max_pending_tools_list),
       audit_sink_{audit_sink} {}
 
 process::ClientMessageDecision ToolCallFilter::inspect(std::string_view message) noexcept {
@@ -300,7 +304,24 @@ process::ClientMessageDecision ToolCallFilter::inspect(std::string_view message)
         return {process::ClientMessageAction::drop};
     }
     if (envelope.method != "tools/call") {
-        if (envelope.method == "tools/list" && envelope.kind == EnvelopeKind::request) {
+        if (envelope.method == "tools/list") {
+            if (envelope.kind != EnvelopeKind::request) {
+                if (pending_count_ >= pending_.size()) {
+                    if (audit_sink_ != nullptr) {
+                        audit_sink_->record({
+                            audit::EventType::correlation_exhausted,
+                            audit::Decision::deny,
+                            audit::Reason::capacity_exhausted,
+                            {},
+                            envelope.id_json,
+                            message.size(),
+                            true,
+                        });
+                    }
+                    return {process::ClientMessageAction::drop};
+                }
+                return {};
+            }
             const PendingStatus pending = add_pending(envelope.id_json);
             if (pending != PendingStatus::added) {
                 if (pending == PendingStatus::capacity_exhausted && audit_sink_ != nullptr) {
@@ -313,6 +334,14 @@ process::ClientMessageDecision ToolCallFilter::inspect(std::string_view message)
                         message.size(),
                         true,
                     });
+                }
+                if (pending == PendingStatus::capacity_exhausted && !envelope.id_json.empty()) {
+                    return {
+                        process::ClientMessageAction::respond_with_error,
+                        envelope.id_json,
+                        correlation_capacity_error_code,
+                        correlation_capacity_error_message,
+                    };
                 }
                 return {process::ClientMessageAction::drop};
             }
@@ -389,7 +418,7 @@ process::ServerMessageDecision ToolCallFilter::inspect_server(std::string_view m
         std::vector<std::string_view> removed_tools;
         const RewriteStatus status = rewrite_tools_list_response(
             message,
-            config_.max_nesting_depth,
+            config_.runtime.max_nesting_depth,
             proxy_,
             removed_tools,
             rewritten_response_);
@@ -419,7 +448,7 @@ process::ServerMessageDecision ToolCallFilter::inspect_server(std::string_view m
 }
 
 ToolCallFilter::PendingStatus ToolCallFilter::add_pending(std::string_view id_json) noexcept {
-    const std::size_t capacity = std::min(config_.max_pending_requests, pending_.size());
+    const std::size_t capacity = pending_.size();
     for (std::size_t index = 0; index < pending_count_; ++index) {
         if (pending_[index].id_json == id_json) {
             return PendingStatus::duplicate;
