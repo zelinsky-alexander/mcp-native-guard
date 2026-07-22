@@ -326,8 +326,9 @@ int run_stdio_child(
     RunConfig config) noexcept {
     constexpr std::size_t response_expansion_bytes = 4U * read_chunk_bytes + 512U;
     if (command.empty() || command.front() == nullptr || config.relay_buffer_bytes == 0U ||
-        config.max_message_bytes == 0U ||
-        config.max_message_bytes > static_cast<std::size_t>(-1) - response_expansion_bytes) {
+        config.runtime.max_message_bytes == 0U || config.runtime.max_nesting_depth == 0U ||
+        config.runtime.max_pending_tools_list == 0U ||
+        config.runtime.max_message_bytes > static_cast<std::size_t>(-1) - response_expansion_bytes) {
         std::cerr << "invalid run configuration\n";
         return 2;
     }
@@ -355,8 +356,8 @@ int run_stdio_child(
     std::vector<char> to_child;
     std::vector<char> to_client;
     try {
-        const std::size_t client_queue_bytes = config.max_message_bytes + read_chunk_bytes + 1U;
-        const std::size_t server_queue_bytes = config.max_message_bytes + response_expansion_bytes;
+        const std::size_t client_queue_bytes = config.runtime.max_message_bytes + read_chunk_bytes + 1U;
+        const std::size_t server_queue_bytes = config.runtime.max_message_bytes + response_expansion_bytes;
         to_child.reserve(std::max(config.relay_buffer_bytes, client_queue_bytes));
         to_client.reserve(std::max(config.relay_buffer_bytes, server_queue_bytes));
     } catch (...) {
@@ -365,8 +366,8 @@ int run_stdio_child(
     }
     std::size_t child_begin = 0;
     std::size_t client_begin = 0;
-    io::LineFramer client_framer{{config.max_message_bytes, 4096U, false}};
-    io::LineFramer server_framer{{config.max_message_bytes, 4096U, false}};
+    io::LineFramer client_framer{{config.runtime.max_message_bytes, 4096U, false}};
+    io::LineFramer server_framer{{config.runtime.max_message_bytes, 4096U, false}};
     bool input_eof = false;
     bool output_eof = false;
     bool child_reaped = false;

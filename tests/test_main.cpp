@@ -160,14 +160,14 @@ void test_json_rpc_envelope_rejects_ambiguous_or_malformed_input() {
 }
 
 void test_json_rpc_envelope_respects_input_limit() {
-    mng::protocol::JsonRpcEnvelopeClassifier classifier{{16U, 4U}};
+    mng::protocol::JsonRpcEnvelopeClassifier classifier{{16U, 4U, 64U}};
     const auto envelope = classifier.classify(R"({"jsonrpc":"2.0","method":"x"})");
     CHECK(!envelope);
     CHECK(envelope.error == mng::protocol::ClassificationError::message_too_large);
 }
 
 void test_json_rpc_envelope_respects_nesting_limit() {
-    mng::protocol::JsonRpcEnvelopeClassifier classifier{{1024U, 1U}};
+    mng::protocol::JsonRpcEnvelopeClassifier classifier{{1024U, 1U, 64U}};
     const auto envelope = classifier.classify(
         R"({"jsonrpc":"2.0","id":1,"result":{"items":[true]}})");
     CHECK(!envelope);
@@ -328,7 +328,7 @@ void test_tool_call_extractor_rejects_malformed_json() {
 }
 
 void test_tool_call_extractor_respects_message_size_limit() {
-    mng::protocol::ToolCallExtractor extractor{{32U, 8U}};
+    mng::protocol::ToolCallExtractor extractor{{32U, 8U, 64U}};
     const auto result = extractor.extract(
         R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}})");
     CHECK(!result);
@@ -341,7 +341,7 @@ void test_tool_call_extractor_respects_nesting_depth_limit() {
     // With max_nesting_depth=3, member values inside the arguments object are
     // at depth 3 (≤ limit) so a flat object is accepted; a doubly-nested
     // object would place a value at depth 4 (> limit) and is rejected.
-    mng::protocol::ToolCallExtractor extractor{{1024U * 1024U, 3U}};
+    mng::protocol::ToolCallExtractor extractor{{1024U * 1024U, 3U, 64U}};
 
     // arguments={"k":1}: member value `1` is at depth 3 – accepted.
     const auto shallow = extractor.extract(
@@ -579,13 +579,14 @@ void test_audit_oversize_and_pending_capacity_events() {
     CHECK(mng::security::PolicyTable::build(
         {}, {mng::security::Access::allow, mng::security::Access::allow}, policy));
     mng::protocol::ToolCallFilter filter{
-        std::move(policy), {128U, 16U, 1U, 8U, 8U}, &audit};
+        std::move(policy), {{128U, 16U, 1U}, 8U, 8U}, &audit};
 
     filter.message_too_large(mng::process::MessageDirection::client_to_server, 129U);
     CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").action ==
           mng::process::ClientMessageAction::forward);
-    CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})").action ==
-          mng::process::ClientMessageAction::drop);
+    const auto full = filter.inspect(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})");
+    CHECK(full.action == mng::process::ClientMessageAction::respond_with_error);
+    CHECK(full.error_code == -32002);
 
     const std::string records = output.str();
     CHECK(records.find(
@@ -755,7 +756,7 @@ void test_tools_list_filter_rejects_malformed_oversized_and_deep_responses() {
     mng::security::PolicyTable policy;
     CHECK(mng::security::PolicyTable::build(
         {}, {mng::security::Access::allow, mng::security::Access::allow}, policy));
-    mng::protocol::ToolCallFilter bounded{std::move(policy), {128U, 4U, 1U, 16U, 16U}};
+    mng::protocol::ToolCallFilter bounded{std::move(policy), {{128U, 4U, 1U}, 16U, 16U}};
     CHECK(bounded.inspect(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").action ==
           mng::process::ClientMessageAction::forward);
     const std::string oversized =
@@ -773,7 +774,7 @@ void test_tools_list_filter_rejects_malformed_oversized_and_deep_responses() {
     mng::security::PolicyTable shallow_policy;
     CHECK(mng::security::PolicyTable::build(
         {}, {mng::security::Access::allow, mng::security::Access::allow}, shallow_policy));
-    mng::protocol::ToolCallFilter shallow{std::move(shallow_policy), {1024U, 5U, 4U, 32U, 64U}};
+    mng::protocol::ToolCallFilter shallow{std::move(shallow_policy), {{1024U, 5U, 4U}, 32U, 64U}};
     CHECK(shallow.inspect(R"({"jsonrpc":"2.0","id":10,"method":"tools/list"})").action ==
           mng::process::ClientMessageAction::forward);
     CHECK(shallow.inspect_server(
@@ -785,11 +786,12 @@ void test_tools_list_pending_capacity_and_cleanup() {
     mng::security::PolicyTable policy;
     CHECK(mng::security::PolicyTable::build(
         {}, {mng::security::Access::allow, mng::security::Access::allow}, policy));
-    mng::protocol::ToolCallFilter filter{std::move(policy), {1024U, 16U, 1U, 8U, 8U}};
+    mng::protocol::ToolCallFilter filter{std::move(policy), {{1024U, 16U, 1U}, 8U, 8U}};
     CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").action ==
           mng::process::ClientMessageAction::forward);
-    CHECK(filter.inspect(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})").action ==
-          mng::process::ClientMessageAction::drop);
+    const auto full = filter.inspect(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})");
+    CHECK(full.action == mng::process::ClientMessageAction::respond_with_error);
+    CHECK(full.error_code == -32002);
     CHECK(filter.pending_request_count() == 1U);
     CHECK(filter.inspect_server(R"({"jsonrpc":"2.0","id":1,"result":{"tools":[]}})").action ==
           mng::process::ServerMessageAction::replace);
@@ -803,13 +805,54 @@ void test_tools_list_pending_capacity_and_cleanup() {
     CHECK(mng::security::PolicyTable::build(
         {}, {mng::security::Access::allow, mng::security::Access::allow}, aggregate_policy));
     mng::protocol::ToolCallFilter aggregate{
-        std::move(aggregate_policy), {1024U, 16U, 4U, 8U, 2U}};
+        std::move(aggregate_policy), {{1024U, 16U, 4U}, 8U, 2U}};
     CHECK(aggregate.inspect(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").action ==
           mng::process::ClientMessageAction::forward);
     CHECK(aggregate.inspect(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})").action ==
           mng::process::ClientMessageAction::forward);
     CHECK(aggregate.inspect(R"({"jsonrpc":"2.0","id":3,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::respond_with_error);
+}
+
+void test_runtime_limits_exact_boundaries_and_untrackable_tools_list() {
+    mng::security::PolicyTable policy;
+    CHECK(mng::security::PolicyTable::build(
+        {}, {mng::security::Access::allow, mng::security::Access::allow}, policy));
+    const std::string call =
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"allowed"}})";
+    mng::protocol::ToolCallFilter exact{
+        std::move(policy), {{call.size(), 64U, 1U}, 32U, 64U}};
+    CHECK(exact.inspect(call).action == mng::process::ClientMessageAction::forward);
+
+    mng::security::PolicyTable small_policy;
+    CHECK(mng::security::PolicyTable::build(
+        {}, {mng::security::Access::allow, mng::security::Access::allow}, small_policy));
+    mng::protocol::ToolCallFilter one_byte_small{
+        std::move(small_policy), {{call.size() - 1U, 64U, 1U}, 32U, 64U}};
+    CHECK(one_byte_small.inspect(call).action == mng::process::ClientMessageAction::drop);
+
+    mng::security::PolicyTable depth_policy;
+    CHECK(mng::security::PolicyTable::build(
+        {}, {mng::security::Access::allow, mng::security::Access::allow}, depth_policy));
+    mng::protocol::ToolCallFilter depth{
+        std::move(depth_policy), {{1024U, 3U, 1U}, 32U, 64U}};
+    CHECK(depth.inspect(
+              R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"allowed","arguments":{"k":1}}})")
+              .action == mng::process::ClientMessageAction::forward);
+    CHECK(depth.inspect(
+              R"({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"allowed","arguments":{"a":{"b":1}}}})")
+              .action == mng::process::ClientMessageAction::respond_with_error);
+
+    mng::security::PolicyTable pending_policy;
+    CHECK(mng::security::PolicyTable::build(
+        {}, {mng::security::Access::allow, mng::security::Access::allow}, pending_policy));
+    mng::protocol::ToolCallFilter none{
+        std::move(pending_policy), {{1024U, 64U, 1U}, 32U, 64U}};
+    CHECK(none.inspect(R"({"jsonrpc":"2.0","id":1,"method":"tools/list"})").action ==
+          mng::process::ClientMessageAction::forward);
+    CHECK(none.inspect(R"({"jsonrpc":"2.0","method":"tools/list"})").action ==
           mng::process::ClientMessageAction::drop);
+    CHECK(none.pending_request_count() == 1U);
 }
 
 const mng::security::ToolRule* find_rule(
@@ -1007,6 +1050,7 @@ int main() {
     test_tools_list_filter_string_numeric_ids_and_duplicate_members();
     test_tools_list_filter_rejects_malformed_oversized_and_deep_responses();
     test_tools_list_pending_capacity_and_cleanup();
+    test_runtime_limits_exact_boundaries_and_untrackable_tools_list();
     test_policy_loader_valid_policy_and_access_values();
     test_policy_loader_allow_and_deny_defaults();
     test_policy_loader_rejects_duplicates_and_malformed_json();

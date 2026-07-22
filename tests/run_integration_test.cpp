@@ -188,7 +188,8 @@ struct TemporaryFile final {
     const char* guard_path,
     const char* server_path,
     std::string_view input,
-    bool audit_stderr = false) {
+    bool audit_stderr = false,
+    bool small_limits = false) {
     FileDescriptor parent_input_read;
     FileDescriptor child_input_write;
     FileDescriptor child_output_read;
@@ -209,24 +210,28 @@ struct TemporaryFile final {
         (void)::dup2(parent_input_read.value, STDIN_FILENO);
         (void)::dup2(parent_output_write.value, STDOUT_FILENO);
         (void)::dup2(parent_error_write.value, STDERR_FILENO);
-        char* arguments[] = {
-            const_cast<char*>(guard_path),
-            const_cast<char*>("run"),
-            const_cast<char*>("--deny-tool"),
-            const_cast<char*>("blocked.one"),
-            const_cast<char*>("--deny-tool"),
-            const_cast<char*>("blocked.two"),
-            const_cast<char*>("--audit-stderr"),
-            const_cast<char*>("--"),
-            const_cast<char*>(server_path),
-            nullptr,
-        };
-        if (!audit_stderr) {
-            arguments[6] = arguments[7];
-            arguments[7] = arguments[8];
-            arguments[8] = nullptr;
+        std::vector<char*> arguments;
+        arguments.push_back(const_cast<char*>(guard_path));
+        arguments.push_back(const_cast<char*>("run"));
+        arguments.push_back(const_cast<char*>("--deny-tool"));
+        arguments.push_back(const_cast<char*>("blocked.one"));
+        arguments.push_back(const_cast<char*>("--deny-tool"));
+        arguments.push_back(const_cast<char*>("blocked.two"));
+        if (small_limits) {
+            arguments.push_back(const_cast<char*>("--max-message-bytes"));
+            arguments.push_back(const_cast<char*>("512"));
+            arguments.push_back(const_cast<char*>("--max-nesting-depth"));
+            arguments.push_back(const_cast<char*>("8"));
+            arguments.push_back(const_cast<char*>("--max-pending-tools-list"));
+            arguments.push_back(const_cast<char*>("1"));
         }
-        ::execv(guard_path, arguments);
+        if (audit_stderr) {
+            arguments.push_back(const_cast<char*>("--audit-stderr"));
+        }
+        arguments.push_back(const_cast<char*>("--"));
+        arguments.push_back(const_cast<char*>(server_path));
+        arguments.push_back(nullptr);
+        ::execv(guard_path, arguments.data());
         _exit(127);
     }
 
@@ -392,6 +397,89 @@ struct TemporaryFile final {
     return condition;
 }
 
+[[nodiscard]] RunResult run_guard_with_extra_options(
+    const char* guard_path,
+    const char* echo_path,
+    const std::vector<const char*>& options) {
+    FileDescriptor parent_input_read;
+    FileDescriptor child_input_write;
+    FileDescriptor child_output_read;
+    FileDescriptor parent_output_write;
+    FileDescriptor child_error_read;
+    FileDescriptor parent_error_write;
+    if (!make_pipe(parent_input_read, child_input_write) ||
+        !make_pipe(child_output_read, parent_output_write) ||
+        !make_pipe(child_error_read, parent_error_write)) {
+        return {};
+    }
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        return {};
+    }
+    if (pid == 0) {
+        (void)::dup2(parent_input_read.value, STDIN_FILENO);
+        (void)::dup2(parent_output_write.value, STDOUT_FILENO);
+        (void)::dup2(parent_error_write.value, STDERR_FILENO);
+        std::vector<char*> arguments;
+        arguments.push_back(const_cast<char*>(guard_path));
+        arguments.push_back(const_cast<char*>("run"));
+        for (const char* option : options) {
+            arguments.push_back(const_cast<char*>(option));
+        }
+        arguments.push_back(const_cast<char*>("--"));
+        arguments.push_back(const_cast<char*>(echo_path));
+        arguments.push_back(const_cast<char*>("--exit-immediately"));
+        arguments.push_back(nullptr);
+        ::execv(guard_path, arguments.data());
+        _exit(127);
+    }
+
+    parent_input_read = {};
+    parent_output_write = {};
+    parent_error_write = {};
+    child_input_write = {};
+    RunResult result;
+    result.output = read_all(child_output_read);
+    result.error = read_all(child_error_read);
+    int status = 1;
+    if (::waitpid(pid, &status, 0) == pid && WIFEXITED(status)) {
+        result.exit_code = WEXITSTATUS(status);
+    }
+    return result;
+}
+
+[[nodiscard]] bool test_runtime_limit_cli_options(const char* guard_path, const char* echo_path) {
+    bool success = true;
+    const auto valid_message = run_guard_with_extra_options(
+        guard_path, echo_path, {"--max-message-bytes", "262144"});
+    success &= check(valid_message.exit_code == 0, "--max-message-bytes accepts valid value");
+    const auto valid_depth = run_guard_with_extra_options(
+        guard_path, echo_path, {"--max-nesting-depth", "32"});
+    success &= check(valid_depth.exit_code == 0, "--max-nesting-depth accepts valid value");
+    const auto valid_pending = run_guard_with_extra_options(
+        guard_path, echo_path, {"--max-pending-tools-list", "64"});
+    success &= check(valid_pending.exit_code == 0, "--max-pending-tools-list accepts valid value");
+    const auto defaults = run_guard_with_extra_options(guard_path, echo_path, {});
+    success &= check(defaults.exit_code == 0, "absent runtime limit options preserve valid defaults");
+
+    const std::vector<std::vector<const char*>> invalid_cases{
+        {"--max-message-bytes", "0"},
+        {"--max-nesting-depth", "abc"},
+        {"--max-pending-tools-list", "-1"},
+        {"--max-message-bytes", "1844674407370955161618446744073709551616"},
+        {"--max-message-bytes", "10", "--max-message-bytes", "10"},
+        {"--max-nesting-depth", "+2"},
+    };
+    for (const auto& invalid : invalid_cases) {
+        const auto result = run_guard_with_extra_options(guard_path, echo_path, invalid);
+        success &= check(result.exit_code == 2, "invalid runtime limit option is rejected before launch");
+        success &= check(result.error.find("echo-server-stderr") == std::string::npos,
+                         "invalid runtime limit prevents downstream child launch");
+    }
+    return success;
+}
+
 [[nodiscard]] bool test_invalid_run_command(const char* guard_path) {
     const pid_t pid = ::fork();
     if (pid < 0) {
@@ -489,6 +577,7 @@ int main(int argc, char** argv) {
     success &= check(early_exit.exit_code == 0, "early child exit is observed");
     success &= check(early_exit.output.empty(), "early child exit produces no MCP stdout");
     success &= check(test_invalid_run_command(argv[1]), "invalid run command is rejected");
+    success &= check(test_runtime_limit_cli_options(argv[1], argv[2]), "runtime limit CLI options are validated");
     success &= check(test_termination(argv[1], argv[2]), "termination escalates without hanging");
 
     const auto enforcement = run_enforcement_guard(
@@ -527,6 +616,40 @@ int main(int argc, char** argv) {
             R"({"jsonrpc":"2.0","id":3,"result":{"protocolVersion":"2025-11-25")") !=
             std::string::npos,
         "ordinary MCP traffic passes through");
+
+
+    const auto small_limits = run_enforcement_guard(
+        argv[1],
+        argv[3],
+        "{\"jsonrpc\":\"2.0\",\"id\":\"list-a\",\"method\":\"tools/list\"}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":\"list-b\",\"method\":\"tools/list\"}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\",\"params\":{\"name\":\"allowed.tool\",\"arguments\":{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":{\"g\":{\"h\":1}}}}}}}}}}}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\"params\":{\"name\":\"allowed.tool\"}}\n",
+        true,
+        true);
+    success &= check(small_limits.exit_code == 0, "small-limit proxy and child exit cleanly");
+    success &= check(
+        small_limits.output.find(R"({"jsonrpc":"2.0","id":"list-a","result":{"tools":)") !=
+            std::string::npos,
+        "normal tools/list succeeds under configured small limits");
+    success &= check(
+        small_limits.output.find(
+            R"({"jsonrpc":"2.0","id":"list-b","error":{"code":-32002,"message":"tools/list correlation capacity exhausted"}})") !=
+            std::string::npos,
+        "pending-correlation exhaustion is bounded with deterministic error");
+    success &= check(
+        small_limits.output.find(
+            R"({"jsonrpc":"2.0","id":41,"error":{"code":-32602,"message":"Invalid tools/call parameters"}})") !=
+            std::string::npos,
+        "excessive nesting fails closed under configured small limits");
+    success &= check(
+        small_limits.output.find(R"({"jsonrpc":"2.0","id":42,"result":{"tool":"allowed.tool"}})") !=
+            std::string::npos,
+        "proxy remains usable after rejected small-limit traffic");
+    success &= check(
+        small_limits.error.find(R"("event":"tools/list_correlation","decision":"deny","reason":"capacity_exhausted")") !=
+            std::string::npos,
+        "resource-limit audit record is emitted under configured small limits");
 
     const auto stderr_audit = run_enforcement_guard(
         argv[1],
