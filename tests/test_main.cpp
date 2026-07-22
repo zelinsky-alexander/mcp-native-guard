@@ -1,5 +1,6 @@
 #include "mcp_native_guard/io/line_framer.hpp"
 #include "mcp_native_guard/protocol/json_rpc_envelope.hpp"
+#include "mcp_native_guard/protocol/tool_call_extractor.hpp"
 #include "mcp_native_guard/proxy/proxy_core.hpp"
 #include "mcp_native_guard/security/policy.hpp"
 
@@ -143,6 +144,189 @@ void test_json_rpc_envelope_respects_nesting_limit() {
     CHECK(envelope.error == mng::protocol::ClassificationError::malformed_json);
 }
 
+// ---------------------------------------------------------------------------
+// ToolCallExtractor tests
+// ---------------------------------------------------------------------------
+
+void test_tool_call_extractor_valid_basic() {
+    mng::protocol::ToolCallExtractor extractor;
+    const auto result = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"demo.read"}})");
+    CHECK(result);
+    CHECK(result.error == mng::protocol::ExtractionError::none);
+    CHECK(result.name == "demo.read");
+    CHECK(result.arguments_json.empty());
+}
+
+void test_tool_call_extractor_valid_with_arguments() {
+    mng::protocol::ToolCallExtractor extractor;
+    const std::string msg =
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fs.read","arguments":{"path":"/tmp","flags":0}}})";
+    const auto result = extractor.extract(msg);
+    CHECK(result);
+    CHECK(result.name == "fs.read");
+    // arguments_json is a raw slice inside the original message
+    CHECK(result.arguments_json == R"({"path":"/tmp","flags":0})");
+    CHECK(result.arguments_json.data() >= msg.data());
+    CHECK(result.arguments_json.data() + result.arguments_json.size() <=
+          msg.data() + msg.size());
+}
+
+void test_tool_call_extractor_valid_reordered_params_members() {
+    // arguments appears before name inside params
+    mng::protocol::ToolCallExtractor extractor;
+    const auto result = extractor.extract(
+        R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"arguments":{"x":1},"name":"tool.a"}})");
+    CHECK(result);
+    CHECK(result.name == "tool.a");
+    CHECK(result.arguments_json == R"({"x":1})");
+}
+
+void test_tool_call_extractor_valid_reordered_top_level() {
+    // params appears before method and jsonrpc at the top level
+    mng::protocol::ToolCallExtractor extractor;
+    const auto result = extractor.extract(
+        R"({"params":{"name":"ns.op"},"method":"tools/call","jsonrpc":"2.0","id":3})");
+    CHECK(result);
+    CHECK(result.name == "ns.op");
+}
+
+void test_tool_call_extractor_valid_extra_params_members() {
+    // params contains unknown members that should be skipped
+    mng::protocol::ToolCallExtractor extractor;
+    const auto result = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"_meta":{"progress":42},"name":"demo.write","arguments":null}})");
+    CHECK(result);
+    CHECK(result.name == "demo.write");
+    CHECK(result.arguments_json == "null");
+}
+
+void test_tool_call_extractor_rejects_missing_params() {
+    mng::protocol::ToolCallExtractor extractor;
+    const auto result = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call"})");
+    CHECK(!result);
+    CHECK(result.error == mng::protocol::ExtractionError::missing_params);
+}
+
+void test_tool_call_extractor_rejects_missing_name() {
+    mng::protocol::ToolCallExtractor extractor;
+
+    // params is an empty object
+    const auto empty_params = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}})");
+    CHECK(!empty_params);
+    CHECK(empty_params.error == mng::protocol::ExtractionError::missing_name);
+
+    // params has arguments but no name
+    const auto no_name = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"k":"v"}}})");
+    CHECK(!no_name);
+    CHECK(no_name.error == mng::protocol::ExtractionError::missing_name);
+}
+
+void test_tool_call_extractor_rejects_duplicate_params() {
+    mng::protocol::ToolCallExtractor extractor;
+    const auto result = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"a"},"params":{"name":"b"}})");
+    CHECK(!result);
+    CHECK(result.error == mng::protocol::ExtractionError::duplicate_params);
+}
+
+void test_tool_call_extractor_rejects_duplicate_name() {
+    mng::protocol::ToolCallExtractor extractor;
+    const auto result = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"a","name":"b"}})");
+    CHECK(!result);
+    CHECK(result.error == mng::protocol::ExtractionError::duplicate_name);
+}
+
+void test_tool_call_extractor_rejects_non_string_name() {
+    mng::protocol::ToolCallExtractor extractor;
+
+    const auto number_name = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":42}})");
+    CHECK(!number_name);
+    CHECK(number_name.error == mng::protocol::ExtractionError::non_string_name);
+
+    const auto bool_name = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":true}})");
+    CHECK(!bool_name);
+    CHECK(bool_name.error == mng::protocol::ExtractionError::non_string_name);
+
+    const auto object_name = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":{}}})");
+    CHECK(!object_name);
+    CHECK(object_name.error == mng::protocol::ExtractionError::non_string_name);
+}
+
+void test_tool_call_extractor_rejects_escaped_name() {
+    mng::protocol::ToolCallExtractor extractor;
+
+    // Forward-slash escape in value
+    const auto escaped_slash = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"demo\/read"}})");
+    CHECK(!escaped_slash);
+    CHECK(escaped_slash.error == mng::protocol::ExtractionError::escaped_name);
+
+    // \u-escape encoding a regular ASCII character
+    const auto escaped_unicode = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"demo\u002Eread"}})");
+    CHECK(!escaped_unicode);
+    CHECK(escaped_unicode.error == mng::protocol::ExtractionError::escaped_name);
+}
+
+void test_tool_call_extractor_rejects_malformed_json() {
+    mng::protocol::ToolCallExtractor extractor;
+
+    // Missing closing brace on top-level object
+    const auto truncated = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"})");
+    CHECK(!truncated);
+    CHECK(truncated.error == mng::protocol::ExtractionError::malformed_json);
+
+    // Bare word instead of value
+    const auto bare_word = extractor.extract(
+        R"({"jsonrpc":"2.0","params":{"name":foo}})");
+    CHECK(!bare_word);
+    CHECK(bare_word.error == mng::protocol::ExtractionError::malformed_json);
+
+    // Not an object at top level
+    const auto not_object = extractor.extract(R"([1,2,3])");
+    CHECK(!not_object);
+    CHECK(not_object.error == mng::protocol::ExtractionError::malformed_json);
+}
+
+void test_tool_call_extractor_respects_message_size_limit() {
+    mng::protocol::ToolCallExtractor extractor{{32U, 8U}};
+    const auto result = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"x"}})");
+    CHECK(!result);
+    CHECK(result.error == mng::protocol::ExtractionError::message_too_large);
+}
+
+void test_tool_call_extractor_respects_nesting_depth_limit() {
+    // Depth accounting: skip_value is called with depth=2 for the arguments
+    // value (top-level is depth 0; params members' values are at depth 2).
+    // With max_nesting_depth=3, member values inside the arguments object are
+    // at depth 3 (≤ limit) so a flat object is accepted; a doubly-nested
+    // object would place a value at depth 4 (> limit) and is rejected.
+    mng::protocol::ToolCallExtractor extractor{{1024U * 1024U, 3U}};
+
+    // arguments={"k":1}: member value `1` is at depth 3 – accepted.
+    const auto shallow = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{"k":1}}})");
+    CHECK(shallow);
+
+    // arguments={"a":{"b":1}}: value `1` inside nested object is at depth 4 – rejected.
+    const auto too_deep = extractor.extract(
+        R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{"a":{"b":1}}}})");
+    CHECK(!too_deep);
+    CHECK(too_deep.error == mng::protocol::ExtractionError::malformed_json);
+}
+
+// ---------------------------------------------------------------------------
+
 mng::security::PolicyTable build_policy() {
     std::vector<mng::security::ToolRule> rules{
         {"filesystem.write_file", mng::security::Access::allow, mng::security::Access::deny},
@@ -202,6 +386,20 @@ int main() {
     test_json_rpc_envelope_rejects_ambiguous_or_malformed_input();
     test_json_rpc_envelope_respects_input_limit();
     test_json_rpc_envelope_respects_nesting_limit();
+    test_tool_call_extractor_valid_basic();
+    test_tool_call_extractor_valid_with_arguments();
+    test_tool_call_extractor_valid_reordered_params_members();
+    test_tool_call_extractor_valid_reordered_top_level();
+    test_tool_call_extractor_valid_extra_params_members();
+    test_tool_call_extractor_rejects_missing_params();
+    test_tool_call_extractor_rejects_missing_name();
+    test_tool_call_extractor_rejects_duplicate_params();
+    test_tool_call_extractor_rejects_duplicate_name();
+    test_tool_call_extractor_rejects_non_string_name();
+    test_tool_call_extractor_rejects_escaped_name();
+    test_tool_call_extractor_rejects_malformed_json();
+    test_tool_call_extractor_respects_message_size_limit();
+    test_tool_call_extractor_respects_nesting_depth_limit();
     test_policy_lookup();
     test_policy_rejects_duplicates();
     test_proxy_core_decisions_and_counters();

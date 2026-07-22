@@ -1,5 +1,6 @@
 #include "mcp_native_guard/io/line_framer.hpp"
 #include "mcp_native_guard/protocol/json_rpc_envelope.hpp"
+#include "mcp_native_guard/protocol/tool_call_extractor.hpp"
 #include "mcp_native_guard/proxy/proxy_core.hpp"
 #include "mcp_native_guard/security/policy.hpp"
 
@@ -41,7 +42,6 @@ int main() {
     constexpr std::size_t batch_message_count = 100'000U;
     constexpr std::size_t chunk_size = 64U * 1024U;
     constexpr auto minimum_duration = std::chrono::seconds{1};
-    constexpr std::string_view tool_name = "demo.read";
     constexpr std::string_view method_name = "tools/call";
     const std::string message =
         R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"demo.read"}})";
@@ -58,6 +58,7 @@ int main() {
     std::uint64_t processed_bytes = 0;
     std::uint64_t batch_count = 0;
     mng::protocol::JsonRpcEnvelopeClassifier classifier;
+    mng::protocol::ToolCallExtractor extractor;
     mng::proxy::ProxyCore proxy{build_policy(), {1024U * 1024U}};
 
     const auto start = std::chrono::steady_clock::now();
@@ -69,6 +70,7 @@ int main() {
             const auto status = framer.feed(
                 std::span<const char>{input.data() + offset, count},
                 [&](std::string_view value) {
+                    // Stage 1: envelope classification
                     const auto envelope = classifier.classify(value);
                     if (!envelope || envelope.kind != mng::protocol::EnvelopeKind::request ||
                         envelope.method != method_name) {
@@ -76,14 +78,24 @@ int main() {
                         return;
                     }
 
-                    const auto decision = proxy.authorize_tool_call(tool_name, value.size());
+                    // Stage 2: zero-copy params extraction
+                    const auto extracted = extractor.extract(value);
+                    if (!extracted) {
+                        processing_failed = true;
+                        return;
+                    }
+
+                    // Stage 3: policy lookup + proxy decision (PolicyTable inside ProxyCore)
+                    const auto decision =
+                        proxy.authorize_tool_call(extracted.name, value.size());
                     if (!decision.should_forward()) {
                         processing_failed = true;
                         return;
                     }
 
                     ++observed_messages;
-                    checksum += value.size() + envelope.method.size() + tool_name.size() +
+                    checksum += value.size() + envelope.method.size() +
+                                extracted.name.size() +
                                 static_cast<std::uint64_t>(envelope.id_kind) +
                                 static_cast<std::uint64_t>(decision.reason);
                 });
