@@ -6,6 +6,7 @@
 #include "mcp_native_guard/protocol/tool_inventory.hpp"
 #include "mcp_native_guard/proxy/proxy_core.hpp"
 #include "mcp_native_guard/security/policy.hpp"
+#include "mcp_native_guard/security/policy_generator.hpp"
 #include "mcp_native_guard/security/policy_loader.hpp"
 #include "mcp_native_guard/version.hpp"
 
@@ -1285,6 +1286,205 @@ void test_validate_initialize_response() {
             {}) == mng::protocol::InventoryError::wrong_response_id);
 }
 
+void test_policy_generator_deny_all_with_no_allow_tools() {
+    const auto result = mng::security::generate_policy_from_inventory(
+        R"({"inventory_version":1,"server":{"downstream_executable":"x"},)"
+        R"("tools":[{"name":"tool.b"},{"name":"tool.a"}]})",
+        {},
+        {});
+    CHECK(result);
+    CHECK(result.policy_json ==
+          R"({"version":1,"defaults":{"visibility":"deny","invocation":"deny"},"tools":[]})");
+}
+
+void test_policy_generator_single_allow_tool() {
+    const auto result = mng::security::generate_policy_from_inventory(
+        R"({"inventory_version":1,"server":{},"tools":[{"name":"tool.a"},{"name":"tool.b"}]})",
+        {"tool.a"},
+        {});
+    CHECK(result);
+    CHECK(result.policy_json ==
+          R"({"version":1,"defaults":{"visibility":"deny","invocation":"deny"},)"
+          R"("tools":[{"name":"tool.a","visibility":"allow","invocation":"allow"}]})");
+}
+
+void test_policy_generator_multiple_allow_tools_sorted_and_order_independent() {
+    const std::string inventory =
+        R"({"inventory_version":1,"server":{},)"
+        R"("tools":[{"name":"tool.c"},{"name":"tool.a"},{"name":"tool.b"}]})";
+    const auto forward = mng::security::generate_policy_from_inventory(
+        inventory, {"tool.c", "tool.a", "tool.b"}, {});
+    const auto reversed = mng::security::generate_policy_from_inventory(
+        inventory, {"tool.b", "tool.a", "tool.c"}, {});
+    CHECK(forward);
+    CHECK(reversed);
+    CHECK(forward.policy_json == reversed.policy_json);
+    CHECK(forward.policy_json ==
+          R"({"version":1,"defaults":{"visibility":"deny","invocation":"deny"},)"
+          R"("tools":[{"name":"tool.a","visibility":"allow","invocation":"allow"},)"
+          R"({"name":"tool.b","visibility":"allow","invocation":"allow"},)"
+          R"({"name":"tool.c","visibility":"allow","invocation":"allow"}]})");
+}
+
+void test_policy_generator_inventory_tool_order_independent() {
+    const auto order_a = mng::security::generate_policy_from_inventory(
+        R"({"inventory_version":1,"server":{},)"
+        R"("tools":[{"name":"tool.b"},{"name":"tool.a"}]})",
+        {"tool.a", "tool.b"},
+        {});
+    const auto order_b = mng::security::generate_policy_from_inventory(
+        R"({"inventory_version":1,"server":{},)"
+        R"("tools":[{"name":"tool.a"},{"name":"tool.b"}]})",
+        {"tool.a", "tool.b"},
+        {});
+    CHECK(order_a);
+    CHECK(order_b);
+    CHECK(order_a.policy_json == order_b.policy_json);
+}
+
+void test_policy_generator_rejects_malformed_and_structural_errors() {
+    using mng::security::PolicyGenerateError;
+    const mng::security::PolicyGeneratorLimits limits;
+
+    CHECK(mng::security::generate_policy_from_inventory("{not json", {}, limits).error ==
+          PolicyGenerateError::malformed_inventory_json);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"server":{},"tools":[]})", {}, limits)
+              .error == PolicyGenerateError::missing_inventory_version);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":2,"server":{},"tools":[]})", {}, limits)
+              .error == PolicyGenerateError::unsupported_inventory_version);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"inventory_version":1,"server":{},"tools":[]})", {}, limits)
+              .error == PolicyGenerateError::duplicate_member);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"tools":[]})", {}, limits)
+              .error == PolicyGenerateError::missing_server);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":"x","tools":[]})", {}, limits)
+              .error == PolicyGenerateError::invalid_server);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{}})", {}, limits)
+              .error == PolicyGenerateError::missing_tools);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{},"tools":{}})", {}, limits)
+              .error == PolicyGenerateError::tools_not_array);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{},"tools":[{"description":"no name"}]})", {}, limits)
+              .error == PolicyGenerateError::missing_tool_name);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{},"tools":[{"name":1}]})", {}, limits)
+              .error == PolicyGenerateError::non_string_tool_name);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{},"tools":[{"name":"esc\"aped"}]})", {}, limits)
+              .error == PolicyGenerateError::escaped_tool_name);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{},"tools":[{"name":""}]})", {}, limits)
+              .error == PolicyGenerateError::empty_tool_name);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{},"tools":[{"name":"a","name":"b"}]})", {}, limits)
+              .error == PolicyGenerateError::duplicate_member);
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{},)"
+              R"("tools":[{"name":"dup"},{"name":"dup"}]})",
+              {},
+              limits)
+              .error == PolicyGenerateError::duplicate_tool_name);
+
+    // Fields not needed for policy generation are safely ignored.
+    const auto ignores_extra_fields = mng::security::generate_policy_from_inventory(
+        R"({"inventory_version":1,"server":{"downstream_executable":"x"},)"
+        R"("tools":[{"name":"tool.a","description":"d","inputSchema":{"type":"object"},)"
+        R"("annotations":{"readOnlyHint":true}}],"extra_field":{"nested":[1,2,3]}})",
+        {"tool.a"},
+        limits);
+    CHECK(ignores_extra_fields);
+    CHECK(ignores_extra_fields.policy_json.find("description") == std::string::npos);
+    CHECK(ignores_extra_fields.policy_json.find("inputSchema") == std::string::npos);
+    CHECK(ignores_extra_fields.policy_json.find("annotations") == std::string::npos);
+}
+
+void test_policy_generator_enforces_bounds() {
+    using mng::security::PolicyGenerateError;
+
+    const mng::security::PolicyGeneratorLimits tiny_input{16U, 64U, 256U, 256U};
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{},"tools":[]})", {}, tiny_input)
+              .error == PolicyGenerateError::inventory_too_large);
+
+    const mng::security::PolicyGeneratorLimits shallow{1024U, 2U, 256U, 256U};
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{"downstream_executable":"x"},)"
+              R"("tools":[{"name":"a"}]})",
+              {},
+              shallow)
+              .error == PolicyGenerateError::excessive_nesting);
+
+    const mng::security::PolicyGeneratorLimits few_tools{1024U * 1024U, 64U, 1U, 256U};
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{},)"
+              R"("tools":[{"name":"a"},{"name":"b"}]})",
+              {},
+              few_tools)
+              .error == PolicyGenerateError::excessive_tool_count);
+
+    const mng::security::PolicyGeneratorLimits short_name{1024U * 1024U, 64U, 256U, 4U};
+    CHECK(mng::security::generate_policy_from_inventory(
+              R"({"inventory_version":1,"server":{},"tools":[{"name":"toolong"}]})", {}, short_name)
+              .error == PolicyGenerateError::oversized_tool_name);
+}
+
+void test_policy_generator_allow_tool_validation() {
+    using mng::security::PolicyGenerateError;
+    const std::string inventory =
+        R"({"inventory_version":1,"server":{},"tools":[{"name":"tool.a"},{"name":"tool.b"}]})";
+
+    const auto unknown =
+        mng::security::generate_policy_from_inventory(inventory, {"tool.zzz"}, {});
+    CHECK(!unknown);
+    CHECK(unknown.error == PolicyGenerateError::unknown_allow_tool);
+    CHECK(unknown.offending_tool_name == "tool.zzz");
+
+    const auto duplicate =
+        mng::security::generate_policy_from_inventory(inventory, {"tool.a", "tool.a"}, {});
+    CHECK(!duplicate);
+    CHECK(duplicate.error == PolicyGenerateError::duplicate_allow_tool);
+    CHECK(duplicate.offending_tool_name == "tool.a");
+}
+
+void test_policy_generator_output_round_trips_through_policy_loader() {
+    const std::string inventory =
+        R"({"inventory_version":1,"server":{},)"
+        R"("tools":[{"name":"allowed.tool"},{"name":"blocked.one"},{"name":"blocked.two"}]})";
+
+    const auto deny_all = mng::security::generate_policy_from_inventory(inventory, {}, {});
+    CHECK(deny_all);
+    mng::security::PolicyDefinition deny_all_definition;
+    const mng::security::PolicyLoader loader;
+    CHECK(loader.parse(deny_all.policy_json, deny_all_definition));
+    mng::security::PolicyTable deny_all_table;
+    CHECK(mng::security::PolicyTable::build(
+        std::move(deny_all_definition.rules), deny_all_definition.defaults, deny_all_table));
+    CHECK(deny_all_table.visibility_for("allowed.tool") == mng::security::Access::deny);
+    CHECK(deny_all_table.invocation_for("allowed.tool") == mng::security::Access::deny);
+    CHECK(deny_all_table.visibility_for("blocked.one") == mng::security::Access::deny);
+
+    const auto allow_one =
+        mng::security::generate_policy_from_inventory(inventory, {"allowed.tool"}, {});
+    CHECK(allow_one);
+    mng::security::PolicyDefinition allow_one_definition;
+    CHECK(loader.parse(allow_one.policy_json, allow_one_definition));
+    mng::security::PolicyTable allow_one_table;
+    CHECK(mng::security::PolicyTable::build(
+        std::move(allow_one_definition.rules), allow_one_definition.defaults, allow_one_table));
+    CHECK(allow_one_table.visibility_for("allowed.tool") == mng::security::Access::allow);
+    CHECK(allow_one_table.invocation_for("allowed.tool") == mng::security::Access::allow);
+    CHECK(allow_one_table.visibility_for("blocked.one") == mng::security::Access::deny);
+    CHECK(allow_one_table.invocation_for("blocked.one") == mng::security::Access::deny);
+    CHECK(allow_one_table.visibility_for("blocked.two") == mng::security::Access::deny);
+    CHECK(allow_one_table.invocation_for("blocked.two") == mng::security::Access::deny);
+}
+
 } // namespace
 
 int main() {
@@ -1337,6 +1537,14 @@ int main() {
     test_cli_deny_overrides_file_policy();
     test_effective_policy_fingerprint_is_canonical_and_sensitive();
     test_session_audit_format_is_bounded_and_safe();
+    test_policy_generator_deny_all_with_no_allow_tools();
+    test_policy_generator_single_allow_tool();
+    test_policy_generator_multiple_allow_tools_sorted_and_order_independent();
+    test_policy_generator_inventory_tool_order_independent();
+    test_policy_generator_rejects_malformed_and_structural_errors();
+    test_policy_generator_enforces_bounds();
+    test_policy_generator_allow_tool_validation();
+    test_policy_generator_output_round_trips_through_policy_loader();
     test_tool_inventory_valid_and_empty();
     test_tool_inventory_reorders_tools_and_members();
     test_tool_inventory_canonicalizes_nested_schema_and_annotations();

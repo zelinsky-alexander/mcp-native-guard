@@ -43,6 +43,7 @@ add_library(mcp_native_guard_core
     src/json_rpc_envelope.cpp
     src/line_framer.cpp
     src/policy.cpp
+    src/policy_generator.cpp
     src/policy_loader.cpp
     src/proxy_core.cpp
     src/tool_call_extractor.cpp
@@ -53,8 +54,10 @@ add_library(mcp_native_guard_core
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(mcp_native_guard_core PRIVATE
         src/linux_stdio_relay.cpp
+        src/atomic_file_writer.cpp
         src/doctor.cpp
         src/inspect.cpp
+        src/policy_create.cpp
     )
     target_compile_definitions(mcp_native_guard_core PUBLIC MNG_HAS_LINUX_STDIO_RELAY=1)
 endif()

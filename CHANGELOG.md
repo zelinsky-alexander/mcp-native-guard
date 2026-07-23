@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a `policy create` command that deterministically generates a version-1 default-deny policy
+  from a version-1 `inspect` inventory, allowing only explicitly named `--allow-tool` tools.
 - Add the real MCP server smoke-test workflow and 0.1 release-hardening documentation.
 
 ## 0.1.0 - Unreleased

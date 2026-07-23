@@ -1,5 +1,6 @@
 #include "mcp_native_guard/process/inspect.hpp"
 
+#include "mcp_native_guard/io/atomic_file_writer.hpp"
 #include "mcp_native_guard/protocol/json_rpc_envelope.hpp"
 #include "mcp_native_guard/protocol/tool_inventory.hpp"
 
@@ -15,7 +16,6 @@
 #include <spawn.h>
 #include <string>
 #include <string_view>
-#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -369,87 +369,13 @@ enum class ReceiveStatus : unsigned char {
 [[nodiscard]] bool write_inventory_atomic(
     std::string_view destination,
     std::string_view inventory_json) {
-    if (destination.empty() || destination == "." || destination == ".." ||
-        destination.back() == '/') {
-        std::cerr << "FAIL invalid inventory output path\n";
-        return false;
-    }
-
-    struct stat destination_stat {};
-    if (::lstat(std::string{destination}.c_str(), &destination_stat) == 0) {
-        if (S_ISDIR(destination_stat.st_mode) || S_ISLNK(destination_stat.st_mode)) {
-            std::cerr << "FAIL inventory output path is not a regular file\n";
-            return false;
-        }
-    } else if (errno != ENOENT) {
-        std::cerr << "FAIL inventory output path unusable\n";
-        return false;
-    }
-
-    std::string directory;
-    const auto slash = destination.find_last_of('/');
-    if (slash == std::string_view::npos) {
-        directory = ".";
-    } else if (slash == 0U) {
-        directory = "/";
-    } else {
-        directory.assign(destination.data(), slash);
-    }
-
-    struct stat directory_stat {};
-    if (::stat(directory.c_str(), &directory_stat) != 0 || !S_ISDIR(directory_stat.st_mode)) {
-        std::cerr << "FAIL inventory output directory unusable\n";
-        return false;
-    }
-
-    std::string pattern = directory;
-    if (pattern.back() != '/') {
-        pattern.push_back('/');
-    }
-    pattern.append(".mng-inspect-XXXXXX");
-    std::vector<char> template_path{pattern.begin(), pattern.end()};
-    template_path.push_back('\0');
-    const int fd = ::mkstemp(template_path.data());
-    if (fd < 0) {
-        std::cerr << "FAIL inventory temporary file create\n";
-        return false;
-    }
-    const std::string temporary{template_path.data()};
-    (void)::fchmod(fd, S_IRUSR | S_IWUSR);
-
-    const auto fail_temp = [&](std::string_view stage) {
-        std::cerr << "FAIL " << stage << '\n';
-        (void)::close(fd);
-        (void)::unlink(temporary.c_str());
-        return false;
-    };
-
     std::string payload;
     payload.reserve(inventory_json.size() + 1U);
     payload.assign(inventory_json);
     payload.push_back('\n');
-    std::string_view remaining{payload};
-    while (!remaining.empty()) {
-        const auto count = ::write(fd, remaining.data(), remaining.size());
-        if (count > 0) {
-            remaining.remove_prefix(static_cast<std::size_t>(count));
-        } else if (count < 0 && errno == EINTR) {
-            continue;
-        } else {
-            return fail_temp("inventory temporary file write");
-        }
-    }
-    if (::fsync(fd) != 0) {
-        return fail_temp("inventory temporary file sync");
-    }
-    if (::close(fd) != 0) {
-        (void)::unlink(temporary.c_str());
-        std::cerr << "FAIL inventory temporary file close\n";
-        return false;
-    }
-    if (::rename(temporary.c_str(), std::string{destination}.c_str()) != 0) {
-        (void)::unlink(temporary.c_str());
-        std::cerr << "FAIL inventory output rename\n";
+    const auto result = mng::io::write_file_atomic(destination, payload, "mng-inspect");
+    if (!result) {
+        std::cerr << "FAIL inventory " << mng::io::atomic_write_error_name(result.error) << '\n';
         return false;
     }
     return true;

@@ -4,6 +4,7 @@
 #include "mcp_native_guard/process/linux_stdio_relay.hpp"
 #include "mcp_native_guard/process/doctor.hpp"
 #include "mcp_native_guard/process/inspect.hpp"
+#include "mcp_native_guard/process/policy_create.hpp"
 #include "mcp_native_guard/protocol/tool_call_filter.hpp"
 #include "mcp_native_guard/protocol/runtime_limits.hpp"
 #include "mcp_native_guard/security/policy.hpp"
@@ -43,6 +44,7 @@ void print_help(std::ostream& output) {
            << "      <server> [args...]\n\n"
            << "  mcp-native-guard doctor [run options] [--doctor-timeout SECONDS] -- <server> [args...]\n\n"
            << "  mcp-native-guard inspect [inspect options] -- <server> [args...]\n\n"
+           << "  mcp-native-guard policy create --from INVENTORY [--allow-tool NAME ...] [--output PATH]\n\n"
            << "relay is an early framing-path harness. It validates bounded newline-delimited\n"
            << "messages and either forwards them to stdout or discards them for measurement.\n"
            << "It is not yet the security proxy MVP.\n\n"
@@ -54,7 +56,12 @@ void print_help(std::ostream& output) {
            << "inspect launches one local stdio MCP server, performs initialize and tools/list,\n"
            << "and writes a deterministic tool inventory. It never invokes tools.\n"
            << "Inventory goes to stdout (or --output PATH); diagnostics go to stderr.\n"
-           << "Intended future CLI alias: mcpg inspect ...\n";
+           << "Intended future CLI alias: mcpg inspect ...\n\n"
+           << "policy create reads exactly one version-1 inspect inventory and generates a\n"
+           << "deterministic version-1 default-deny policy. Only tools named by --allow-tool\n"
+           << "become explicit allow/allow rules; it never classifies tool safety and never\n"
+           << "launches a server. Policy JSON goes to stdout (or --output PATH); diagnostics\n"
+           << "go to stderr. Intended future CLI alias: mcpg policy create ...\n";
 }
 
 
@@ -383,6 +390,14 @@ int main(int argc, char** argv) {
     }
     if (std::string_view{argv[1]} == "inspect") {
         return mng::process::run_inspect(argc, argv);
+    }
+    if (std::string_view{argv[1]} == "policy") {
+        if (argc < 3 || std::string_view{argv[2]} != "create") {
+            std::cerr << "unknown policy subcommand (expected: policy create)\n";
+            print_help(std::cerr);
+            return 2;
+        }
+        return mng::process::run_policy_create(argc, argv);
     }
 #endif
 

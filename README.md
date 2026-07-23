@@ -29,6 +29,8 @@ call-time policy enforcement, tool-definition baselines, and an append-only audi
 - A bounded local `doctor` compatibility check and offline audit summary tool.
 - A bounded local `inspect` command that performs initialize and `tools/list` discovery only,
   writes a deterministic tool inventory, and never invokes tools.
+- A bounded local `policy create` command that deterministically generates a version-1
+  default-deny policy from a version-1 inspect inventory, without classifying tool safety.
 - Focused dependency-free tests.
 - Optional dependency-free framing microbenchmark.
 - Debug, sanitizer, and performance CMake presets.
@@ -180,6 +182,35 @@ Managed operation remains per-session rather than daemon-based. Session schema, 
 limitations, doctor usage, launcher templates, scheduled user smoke testing, and audit summary usage
 are documented in [`docs/managed-local-deployment.md`](docs/managed-local-deployment.md).
 
+### policy create (deterministic default-deny policy generation)
+
+`policy create` reads exactly one version-1 `inspect` inventory and deterministically
+generates a version-1 default-deny policy. Generated defaults are always
+`"visibility":"deny"`/`"invocation":"deny"`; each `--allow-tool NAME` adds exactly one explicit
+allow/allow rule for a tool that must already exist in the inventory. It never classifies tool
+safety from tool names, descriptions, input schemas, or annotations; it never launches a server,
+performs inspection itself, or merges with an existing policy file. An inventory with no
+`--allow-tool` arguments produces a valid deny-all policy. Policy JSON goes to stdout (or
+`--output PATH`, written atomically); diagnostics go to stderr. The currently built executable
+name is `mcp-native-guard`; the intended future CLI alias is `mcpg`.
+
+```bash
+./build/dev-debug/mcp-native-guard inspect -- \
+  ./build/dev-debug/test_servers/mng_test_mcp_server > /tmp/inventory.json
+
+./build/dev-debug/mcp-native-guard policy create \
+  --from /tmp/inventory.json --allow-tool allowed.tool --output /tmp/policy.json
+```
+
+```bash
+# intended future alias (not a separate binary yet):
+# mcpg policy create --from inventory.json --allow-tool read_text_file --output policy.json
+```
+
+Inspecting a server's inventory does not prove any tool is safe, and a generated policy still
+provides no OS-level containment by itself. Full semantics, validation, and determinism rules are
+documented in [`docs/policy-create.md`](docs/policy-create.md).
+
 ## Compatibility limits for 0.1
 
 - Runtime proxy support is Linux-only for local stdio child processes.
@@ -191,6 +222,7 @@ are documented in [`docs/managed-local-deployment.md`](docs/managed-local-deploy
 - Runtime defaults are `--max-message-bytes 1048576`, `--max-nesting-depth 64`, and `--max-pending-tools-list 64`.
 - `inspect` performs discovery only and never invokes tools; it does not prove server safety or OS containment.
 - `inspect` process-group termination applies to the inspect spawn path only; `run` still signals the direct child PID.
+- `policy create` only encodes an explicit `--allow-tool` allow list; it never classifies tool safety and does not prove server safety or provide OS containment.
 - HTTP transports, OAuth, TLS termination, Windows process isolation, policy hot reload, wildcard rules, dashboards, metrics, and log rotation are not implemented.
 
 ## Real MCP server smoke test
