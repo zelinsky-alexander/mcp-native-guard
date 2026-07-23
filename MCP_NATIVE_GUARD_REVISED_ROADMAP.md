@@ -64,12 +64,12 @@ Goal:
 ### Suggested CLI
 
 ```bash
-mng inspect -- npx -y @modelcontextprotocol/server-filesystem /path
-mng policy create --profile filesystem-readonly --from inspection.json
-mng configure cursor filesystem
-mng configure vscode filesystem
-mng client audit cursor
-mng client audit vscode
+mcpg inspect -- npx -y @modelcontextprotocol/server-filesystem /path
+mcpg policy create --profile filesystem-readonly --from inspection.json
+mcpg configure cursor filesystem
+mcpg configure vscode filesystem
+mcpg client audit cursor
+mcpg client audit vscode
 ```
 
 ### Success Criteria
@@ -122,10 +122,10 @@ Goal:
 ### Suggested CLI
 
 ```bash
-mng baseline create filesystem
-mng baseline verify filesystem
-mng baseline diff filesystem
-mng baseline approve filesystem
+mcpg baseline create filesystem
+mcpg baseline verify filesystem
+mcpg baseline diff filesystem
+mcpg baseline approve filesystem
 ```
 
 ### Success Criteria
@@ -178,7 +178,7 @@ Do not claim complete isolation until adversarial tests demonstrate the intended
 ### Suggested CLI
 
 ```bash
-mng run   --sandbox   --fs-read /home/alex/project   --fs-write-none   --network deny   --env-clean   -- npx -y some-mcp-server
+mcpg run   --sandbox   --fs-read /home/alex/project   --fs-write-none   --network deny   --env-clean   -- npx -y some-mcp-server
 ```
 
 ### Adversarial Test Server

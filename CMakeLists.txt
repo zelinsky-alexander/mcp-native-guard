@@ -47,10 +47,15 @@ add_library(mcp_native_guard_core
     src/proxy_core.cpp
     src/tool_call_extractor.cpp
     src/tool_call_filter.cpp
+    src/tool_inventory.cpp
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_sources(mcp_native_guard_core PRIVATE src/linux_stdio_relay.cpp src/doctor.cpp)
+    target_sources(mcp_native_guard_core PRIVATE
+        src/linux_stdio_relay.cpp
+        src/doctor.cpp
+        src/inspect.cpp
+    )
     target_compile_definitions(mcp_native_guard_core PUBLIC MNG_HAS_LINUX_STDIO_RELAY=1)
 endif()
 

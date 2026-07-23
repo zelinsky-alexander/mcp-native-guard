@@ -27,6 +27,8 @@ call-time policy enforcement, tool-definition baselines, and an append-only audi
 - Optional bounded JSONL enforcement audit output to a local file or stderr.
 - Per-session start/end health records, safe server labels, and effective-policy fingerprints.
 - A bounded local `doctor` compatibility check and offline audit summary tool.
+- A bounded local `inspect` command that performs initialize and `tools/list` discovery only,
+  writes a deterministic tool inventory, and never invokes tools.
 - Focused dependency-free tests.
 - Optional dependency-free framing microbenchmark.
 - Debug, sanitizer, and performance CMake presets.
@@ -144,6 +146,31 @@ project-specific code is temporary until the project's public runtime-limit erro
 finalized. Notifications or messages without a usable ID are dropped. If audit is enabled, the
 proxy emits a resource-limit audit record and remains available for later traffic.
 
+### inspect (discovery only)
+
+`inspect` launches one local stdio MCP child, sends only `initialize`,
+`notifications/initialized`, and `tools/list`, and writes a deterministic JSON
+inventory. It never invokes tools. Inventory goes to stdout (or `--output PATH`);
+diagnostics go to stderr. The currently built executable name is
+`mcp-native-guard`; the intended future CLI alias is `mcpg`.
+
+```bash
+./build/dev-debug/mcp-native-guard inspect -- \
+  ./build/dev-debug/test_servers/mng_test_mcp_server
+```
+
+```bash
+# intended future alias (not a separate binary yet):
+# mcpg inspect -- npx -y @modelcontextprotocol/server-filesystem@2026.7.10 /path
+```
+
+Inspection does not prove a server is safe and does not provide OS-level
+containment. Escaped tool names remain unsupported. `inputSchema` and
+`annotations` are recursively canonicalized (sorted object keys, compact form);
+numeric spellings such as `1` / `1.0` / `1e0` are not normalized. Child stderr is
+redirected to `/dev/null` during inspect. Limits, inventory shape, and failure
+behavior are documented in [`docs/inspect.md`](docs/inspect.md).
+
 Audit records cover allowed, denied, and invalid `tools/call` messages; removed `tools/list`
 definitions; oversized messages; and pending-correlation capacity exhaustion. Each record includes
 a UTC timestamp, event, decision, reason, and only the applicable tool name, raw request ID, and
@@ -162,6 +189,8 @@ are documented in [`docs/managed-local-deployment.md`](docs/managed-local-deploy
 - Escaped tool names in security-relevant JSON strings are rejected in this version.
 - Audit records omit full arguments and full JSON-RPC payloads but may include tool names, request IDs, timestamps, and message sizes.
 - Runtime defaults are `--max-message-bytes 1048576`, `--max-nesting-depth 64`, and `--max-pending-tools-list 64`.
+- `inspect` performs discovery only and never invokes tools; it does not prove server safety or OS containment.
+- `inspect` process-group termination applies to the inspect spawn path only; `run` still signals the direct child PID.
 - HTTP transports, OAuth, TLS termination, Windows process isolation, policy hot reload, wildcard rules, dashboards, metrics, and log rotation are not implemented.
 
 ## Real MCP server smoke test

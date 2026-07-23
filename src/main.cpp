@@ -3,6 +3,7 @@
 #include "mcp_native_guard/audit/audit_sink.hpp"
 #include "mcp_native_guard/process/linux_stdio_relay.hpp"
 #include "mcp_native_guard/process/doctor.hpp"
+#include "mcp_native_guard/process/inspect.hpp"
 #include "mcp_native_guard/protocol/tool_call_filter.hpp"
 #include "mcp_native_guard/protocol/runtime_limits.hpp"
 #include "mcp_native_guard/security/policy.hpp"
@@ -41,6 +42,7 @@ void print_help(std::ostream& output) {
            << "      [--max-pending-tools-list N] [--audit-file PATH | --audit-stderr] --\n"
            << "      <server> [args...]\n\n"
            << "  mcp-native-guard doctor [run options] [--doctor-timeout SECONDS] -- <server> [args...]\n\n"
+           << "  mcp-native-guard inspect [inspect options] -- <server> [args...]\n\n"
            << "relay is an early framing-path harness. It validates bounded newline-delimited\n"
            << "messages and either forwards them to stdout or discards them for measurement.\n"
            << "It is not yet the security proxy MVP.\n\n"
@@ -48,7 +50,11 @@ void print_help(std::ostream& output) {
            << "Each --deny-tool rule overrides the file policy to deny invocation and visibility.\n"
            << "Audit JSONL is disabled by default and is never written to MCP stdout.\n"
            << "Runtime limit defaults: max-message-bytes=1048576, max-nesting-depth=64, "
-           << "max-pending-tools-list=64.\n";
+           << "max-pending-tools-list=64.\n\n"
+           << "inspect launches one local stdio MCP server, performs initialize and tools/list,\n"
+           << "and writes a deterministic tool inventory. It never invokes tools.\n"
+           << "Inventory goes to stdout (or --output PATH); diagnostics go to stderr.\n"
+           << "Intended future CLI alias: mcpg inspect ...\n";
 }
 
 
@@ -374,6 +380,9 @@ int main(int argc, char** argv) {
 #if defined(MNG_HAS_LINUX_STDIO_RELAY)
     if (std::string_view{argv[1]} == "doctor") {
         return mng::process::run_doctor(argc, argv);
+    }
+    if (std::string_view{argv[1]} == "inspect") {
+        return mng::process::run_inspect(argc, argv);
     }
 #endif
 

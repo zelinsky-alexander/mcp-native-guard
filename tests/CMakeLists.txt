@@ -41,4 +41,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             $<TARGET_FILE:mcp_native_guard_test_echo_server>
             $<TARGET_FILE:mng_test_mcp_server>
     )
+
+    add_executable(mcp_native_guard_inspect_integration_tests inspect_integration_test.cpp)
+    target_compile_features(mcp_native_guard_inspect_integration_tests PRIVATE cxx_std_20)
+    add_test(
+        NAME mcp_native_guard_inspect_integration_tests
+        COMMAND
+            mcp_native_guard_inspect_integration_tests
+            $<TARGET_FILE:mcp-native-guard>
+            $<TARGET_FILE:mng_test_mcp_server>
+    )
 endif()

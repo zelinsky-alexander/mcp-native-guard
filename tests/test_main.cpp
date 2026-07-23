@@ -3,6 +3,7 @@
 #include "mcp_native_guard/protocol/json_rpc_envelope.hpp"
 #include "mcp_native_guard/protocol/tool_call_extractor.hpp"
 #include "mcp_native_guard/protocol/tool_call_filter.hpp"
+#include "mcp_native_guard/protocol/tool_inventory.hpp"
 #include "mcp_native_guard/proxy/proxy_core.hpp"
 #include "mcp_native_guard/security/policy.hpp"
 #include "mcp_native_guard/security/policy_loader.hpp"
@@ -1043,6 +1044,247 @@ void test_session_audit_format_is_bounded_and_safe() {
     CHECK(output.find("policy contents") == std::string::npos);
 }
 
+void test_tool_inventory_valid_and_empty() {
+    const auto parsed = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"b","description":"bee","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":true}},{"name":"a"}]}})",
+        R"("inspect-list")",
+        "fixture",
+        {});
+    CHECK(parsed);
+    CHECK(parsed.inventory.tools.size() == 2U);
+    CHECK(parsed.inventory.tools[0].name == "a");
+    CHECK(parsed.inventory.tools[1].name == "b");
+    CHECK(parsed.inventory.tools[1].description_json == R"("bee")");
+    CHECK(parsed.inventory.tools[1].input_schema_json == R"({"type":"object"})");
+    CHECK(parsed.inventory.tools[1].annotations_json == R"({"readOnlyHint":true})");
+
+    std::string emitted;
+    CHECK(mng::protocol::emit_inventory_json(parsed.inventory, emitted, 1U << 20));
+    CHECK(emitted.find(R"("name":"a")") != std::string::npos);
+    CHECK(emitted.find(R"("name":"a")") < emitted.find(R"("name":"b")"));
+    CHECK(emitted.find(R"("inventory_version":1)") != std::string::npos);
+    CHECK(emitted.find(R"("downstream_executable":"fixture")") != std::string::npos);
+
+    const auto empty = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[]}})",
+        R"("inspect-list")",
+        "fixture",
+        {});
+    CHECK(empty);
+    CHECK(empty.inventory.tools.empty());
+    std::string empty_json;
+    CHECK(mng::protocol::emit_inventory_json(empty.inventory, empty_json, 1U << 20));
+    CHECK(empty_json ==
+          R"({"inventory_version":1,"server":{"downstream_executable":"fixture"},"tools":[]})");
+}
+
+void test_tool_inventory_reorders_tools_and_members() {
+    const auto first = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"z","description":"zee","inputSchema":{"type":"object"}},{"name":"a","description":"aye"}]}})",
+        R"("inspect-list")",
+        "srv",
+        {});
+    const auto reordered_tools = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"a","description":"aye"},{"name":"z","description":"zee","inputSchema":{"type":"object"}}]}})",
+        R"("inspect-list")",
+        "srv",
+        {});
+    const auto reordered_members = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"inputSchema":{"type":"object"},"description":"zee","name":"z"},{"description":"aye","name":"a"}]}})",
+        R"("inspect-list")",
+        "srv",
+        {});
+    CHECK(first);
+    CHECK(reordered_tools);
+    CHECK(reordered_members);
+    std::string a;
+    std::string b;
+    std::string c;
+    CHECK(mng::protocol::emit_inventory_json(first.inventory, a, 1U << 20));
+    CHECK(mng::protocol::emit_inventory_json(reordered_tools.inventory, b, 1U << 20));
+    CHECK(mng::protocol::emit_inventory_json(reordered_members.inventory, c, 1U << 20));
+    CHECK(a == b);
+    CHECK(a == c);
+}
+
+void test_tool_inventory_canonicalizes_nested_schema_and_annotations() {
+    const auto schema_a = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"t","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}},"annotations":{"openWorldHint":false,"readOnlyHint":true}}]}})",
+        R"("inspect-list")",
+        "srv",
+        {});
+    const auto schema_b = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"t","inputSchema":{"properties":{"value":{"type":"string"}},"type":"object"},"annotations":{"readOnlyHint":true,"openWorldHint":false}}]}})",
+        R"("inspect-list")",
+        "srv",
+        {});
+    const auto schema_ws = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"t","inputSchema":{ "type" : "object" , "properties" : { "value" : { "type" : "string" } } },"annotations":{ "openWorldHint" : false , "readOnlyHint" : true }}]}})",
+        R"("inspect-list")",
+        "srv",
+        {});
+    CHECK(schema_a);
+    CHECK(schema_b);
+    CHECK(schema_ws);
+    CHECK(schema_a.inventory.tools[0].input_schema_json ==
+          R"({"properties":{"value":{"type":"string"}},"type":"object"})");
+    CHECK(schema_a.inventory.tools[0].annotations_json ==
+          R"({"openWorldHint":false,"readOnlyHint":true})");
+    std::string out_a;
+    std::string out_b;
+    std::string out_ws;
+    CHECK(mng::protocol::emit_inventory_json(schema_a.inventory, out_a, 1U << 20));
+    CHECK(mng::protocol::emit_inventory_json(schema_b.inventory, out_b, 1U << 20));
+    CHECK(mng::protocol::emit_inventory_json(schema_ws.inventory, out_ws, 1U << 20));
+    CHECK(out_a == out_b);
+    CHECK(out_a == out_ws);
+
+    const auto array_order = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"t","inputSchema":{"required":["b","a"],"type":"object"}}]}})",
+        R"("inspect-list")",
+        "srv",
+        {});
+    CHECK(array_order);
+    CHECK(array_order.inventory.tools[0].input_schema_json ==
+          R"({"required":["b","a"],"type":"object"})");
+
+    const auto dup_schema = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"t","inputSchema":{"type":"object","type":"string"}}]}})",
+        R"("inspect-list")",
+        "srv",
+        {});
+    CHECK(!dup_schema);
+    CHECK(dup_schema.error == mng::protocol::InventoryError::duplicate_member);
+
+    const auto dup_annotations = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"t","annotations":{"readOnlyHint":true,"readOnlyHint":false}}]}})",
+        R"("inspect-list")",
+        "srv",
+        {});
+    CHECK(!dup_annotations);
+    CHECK(dup_annotations.error == mng::protocol::InventoryError::duplicate_member);
+}
+
+void test_tool_inventory_rejects_malformed_cases() {
+    const auto expect_error = [](std::string_view message, mng::protocol::InventoryError error) {
+        const auto parsed = mng::protocol::parse_tools_list_response(
+            message, R"("inspect-list")", "srv", {});
+        CHECK(!parsed);
+        CHECK(parsed.error == error);
+    };
+    expect_error(
+        R"({"jsonrpc":"1.0","id":"inspect-list","result":{"tools":[]}})",
+        mng::protocol::InventoryError::unsupported_jsonrpc_version);
+    expect_error(
+        R"({"jsonrpc":"2.0","id":"other","result":{"tools":[]}})",
+        mng::protocol::InventoryError::wrong_response_id);
+    expect_error(
+        R"({"jsonrpc":"2.0","id":"inspect-list","error":{"code":-1,"message":"x"}})",
+        mng::protocol::InventoryError::error_result);
+    expect_error(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"nextCursor":null}})",
+        mng::protocol::InventoryError::missing_tools);
+    expect_error(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":{}}})",
+        mng::protocol::InventoryError::tools_not_array);
+    expect_error(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"description":"x"}]}})",
+        mng::protocol::InventoryError::missing_tool_name);
+    expect_error(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":1}]}})",
+        mng::protocol::InventoryError::non_string_tool_name);
+    expect_error(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"a\"b"}]}})",
+        mng::protocol::InventoryError::escaped_tool_name);
+    expect_error(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"a","name":"b"}]}})",
+        mng::protocol::InventoryError::duplicate_member);
+    expect_error(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"dup"},{"name":"dup"}]}})",
+        mng::protocol::InventoryError::duplicate_tool_name);
+    expect_error("{not-json", mng::protocol::InventoryError::malformed_json);
+}
+
+void test_tool_inventory_enforces_bounds() {
+    mng::protocol::InventoryLimits limits;
+    limits.max_tools = 1U;
+    auto parsed = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"a"},{"name":"b"}]}})",
+        R"("inspect-list")",
+        "srv",
+        limits);
+    CHECK(!parsed);
+    CHECK(parsed.error == mng::protocol::InventoryError::excessive_tool_count);
+
+    limits = {};
+    limits.max_tool_name_bytes = 2U;
+    parsed = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"abc"}]}})",
+        R"("inspect-list")",
+        "srv",
+        limits);
+    CHECK(!parsed);
+    CHECK(parsed.error == mng::protocol::InventoryError::oversized_tool_name);
+
+    limits = {};
+    limits.max_tool_description_bytes = 3U;
+    parsed = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"a","description":"abcd"}]}})",
+        R"("inspect-list")",
+        "srv",
+        limits);
+    CHECK(!parsed);
+    CHECK(parsed.error == mng::protocol::InventoryError::oversized_description);
+
+    limits = {};
+    limits.max_tool_schema_bytes = 8U;
+    parsed = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"a","inputSchema":{"type":"object","extra":true}}]}})",
+        R"("inspect-list")",
+        "srv",
+        limits);
+    CHECK(!parsed);
+    CHECK(parsed.error == mng::protocol::InventoryError::oversized_schema);
+
+    limits = {};
+    limits.max_nesting_depth = 2U;
+    parsed = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[{"name":"a","inputSchema":{"a":{"b":1}}}]}})",
+        R"("inspect-list")",
+        "srv",
+        limits);
+    CHECK(!parsed);
+    CHECK(parsed.error == mng::protocol::InventoryError::excessive_nesting);
+
+    limits = {};
+    limits.max_message_bytes = 16U;
+    parsed = mng::protocol::parse_tools_list_response(
+        R"({"jsonrpc":"2.0","id":"inspect-list","result":{"tools":[]}})",
+        R"("inspect-list")",
+        "srv",
+        limits);
+    CHECK(!parsed);
+    CHECK(parsed.error == mng::protocol::InventoryError::message_too_large);
+}
+
+void test_validate_initialize_response() {
+    CHECK(
+        mng::protocol::validate_initialize_response(
+            R"({"jsonrpc":"2.0","id":"inspect-init","result":{"protocolVersion":"2025-11-25"}})",
+            R"("inspect-init")",
+            {}) == mng::protocol::InventoryError::none);
+    CHECK(
+        mng::protocol::validate_initialize_response(
+            R"({"jsonrpc":"2.0","id":"inspect-init","error":{"code":-1,"message":"x"}})",
+            R"("inspect-init")",
+            {}) == mng::protocol::InventoryError::error_result);
+    CHECK(
+        mng::protocol::validate_initialize_response(
+            R"({"jsonrpc":"2.0","id":"other","result":{}})",
+            R"("inspect-init")",
+            {}) == mng::protocol::InventoryError::wrong_response_id);
+}
+
 } // namespace
 
 int main() {
@@ -1095,6 +1337,12 @@ int main() {
     test_cli_deny_overrides_file_policy();
     test_effective_policy_fingerprint_is_canonical_and_sensitive();
     test_session_audit_format_is_bounded_and_safe();
+    test_tool_inventory_valid_and_empty();
+    test_tool_inventory_reorders_tools_and_members();
+    test_tool_inventory_canonicalizes_nested_schema_and_annotations();
+    test_tool_inventory_rejects_malformed_cases();
+    test_tool_inventory_enforces_bounds();
+    test_validate_initialize_response();
 
     if (failures != 0) {
         std::cerr << failures << " test check(s) failed\n";
