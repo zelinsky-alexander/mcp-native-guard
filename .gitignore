@@ -10,3 +10,6 @@
 *.log
 *.jsonl
 benchmark-results/json-rpc-lto-comparison.txt
+scripts/__pycache__/audit_health_summary.cpython-312.pyc
+tests/__pycache__/test_audit_health_summary.cpython-312.pyc
+/MCP_NATIVE_GUARD_REVISED_ROADMAP.mdZone.Identifier

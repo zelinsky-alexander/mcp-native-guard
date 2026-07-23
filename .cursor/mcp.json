@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "guardedFilesystem": {
+      "command": "/home/alex/.local/bin/mng-filesystem-readonly",
+      "args": []
+    }
+  }
+}
