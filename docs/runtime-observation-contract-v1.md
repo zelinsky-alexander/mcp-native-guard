@@ -14,6 +14,21 @@ The outer worker, not `mcp-native-guard`, owns package installation, container o
 microVM isolation, network policy, filesystem policy, resource limits, and evidence
 persistence.
 
+## Automation profile
+
+Unattended Observatory coverage uses the versioned profile
+[`profiles/observatory-discovery-v1.json`](../profiles/observatory-discovery-v1.json).
+The profile is a declarative compatibility fingerprint for the discovery protocol;
+it is not executable policy and it does not add any tool invocation.
+
+Observatory MUST hash the exact profile bytes and bind that digest to its scheduler
+profile. Changing the profile therefore creates a new coverage profile instead of
+silently treating observations made under different discovery semantics as
+compatible.
+
+The profile fixes the current automated contract to local `stdio`, `inspect`,
+`inventory_version=1`, and the three-message discovery sequence documented below.
+
 ## Inventory
 
 A successful invocation emits the existing deterministic inventory:
@@ -52,11 +67,18 @@ The outer sandbox worker wraps the validated inventory in an observation envelop
   "artifact_sha256": "<64 lowercase hex>",
   "launch_profile_sha256": "<64 lowercase hex>",
   "sandbox_image": "<immutable image reference>",
-  "guard_version": "<version>",
+  "guard_version": "<version or executable digest>",
+  "probe_profile_sha256": "<64 lowercase hex>",
   "inventory_sha256": "<64 lowercase hex>",
   "inventory": {}
 }
 ```
+
+The scheduler profile additionally binds the exact Guard executable digest, runtime
+runner digest, runtime image reference, and probe-profile digest. The current
+runtime-discovery v1 database stores the Guard executable as `sha256:<digest>` and
+the image reference alongside each observation; the scheduler owns the probe-profile
+identity until the observation schema is expanded in a later milestone.
 
 This envelope is intentionally produced and signed or persisted by Observatory,
 not by the inspected process. The inspected process never receives a database,
@@ -77,10 +99,17 @@ Two observations compare canonical tool definitions by exact tool name:
 - `modified`: name appears in both but the complete canonical tool object differs;
 - `unchanged`: complete canonical tool objects are byte-equivalent.
 
+For automatic longitudinal comparison, Observatory compares observations only when
+they were produced by the same scheduler profile and refer to the same logical
+server/package lineage. A package release change is therefore the subject of the
+comparison, while the Guard, probe semantics, runner, and runtime image remain
+fixed.
+
 A difference is evidence of interface drift, not automatically a security finding.
 
 ## Security statement
 
 A successful discovery observation proves only that one exact artifact, launch
-profile, guard version, and sandbox image completed the bounded discovery protocol.
-It does not prove absence of malicious behavior and does not exercise tool effects.
+profile, Guard executable, probe profile, and sandbox image completed the bounded
+discovery protocol. It does not prove absence of malicious behavior and does not
+exercise tool effects.
