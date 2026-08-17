@@ -1,0 +1,20 @@
+{
+  "profile_version": 1,
+  "profile_id": "observatory-discovery-v1",
+  "transport": "stdio",
+  "guard_command": "inspect",
+  "tool_invocation": false,
+  "inventory_version": 1,
+  "protocol_sequence": [
+    "initialize",
+    "notifications/initialized",
+    "tools/list"
+  ],
+  "comparison": {
+    "tool_identity": "exact-name",
+    "definition_identity": "complete-canonical-tool-object"
+  },
+  "limits": {
+    "maximum_tools": 256
+  }
+}
