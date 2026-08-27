@@ -1,0 +1,17 @@
+{
+  "profile_version": 1,
+  "profile_id": "observatory-remote-discovery-v1",
+  "transport": "streamable-http",
+  "guard_command": "inspect-remote-contract",
+  "tool_invocation": false,
+  "inventory_version": 1,
+  "methods": [
+    "initialize",
+    "notifications/initialized",
+    "tools/list"
+  ],
+  "redirect_policy": "deny",
+  "authentication": "none",
+  "destination_policy": "registry-declared-exact-url-public-address-only",
+  "notes": "Contract profile for Observatory remote transport probing. The current transport runner lives in mcp-observatory; Native Guard remains the canonical local stdio sensor until native HTTP transport support is added."
+}
