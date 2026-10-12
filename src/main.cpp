@@ -2,6 +2,7 @@
 #if defined(MNG_HAS_LINUX_STDIO_RELAY)
 #include "mcp_native_guard/audit/audit_sink.hpp"
 #include "mcp_native_guard/process/linux_stdio_relay.hpp"
+#include "mcp_native_guard/process/strace_command.hpp"
 #include "mcp_native_guard/process/doctor.hpp"
 #include "mcp_native_guard/process/inspect.hpp"
 #include "mcp_native_guard/process/policy_create.hpp"
@@ -40,7 +41,8 @@ void print_help(std::ostream& output) {
            << "  mcp-native-guard relay [--discard] [--max-message-bytes N]\n\n"
            << "  mcp-native-guard run [--policy FILE] [--server-label LABEL] [--deny-tool TOOL_NAME ...]\n"
            << "      [--max-message-bytes N] [--max-nesting-depth N]\n"
-           << "      [--max-pending-tools-list N] [--audit-file PATH | --audit-stderr] --\n"
+           << "      [--max-pending-tools-list N] [--audit-file PATH | --audit-stderr]\n"
+           << "      [--strace-file PATH] --\n"
            << "      <server> [args...]\n\n"
            << "  mcp-native-guard doctor [run options] [--doctor-timeout SECONDS] -- <server> [args...]\n\n"
            << "  mcp-native-guard inspect [inspect options] -- <server> [args...]\n\n"
@@ -84,7 +86,8 @@ bool parse_bounded_integer(std::string_view text, std::size_t& value) {
 void print_run_usage(std::ostream& output) {
     output << "usage: mcp-native-guard run [--policy FILE] [--server-label LABEL] [--deny-tool TOOL_NAME ...] "
               "[--max-message-bytes N] [--max-nesting-depth N] "
-              "[--max-pending-tools-list N] [--audit-file PATH | --audit-stderr] -- "
+              "[--max-pending-tools-list N] [--audit-file PATH | --audit-stderr] "
+              "[--strace-file PATH] -- "
               "<server> [args...]\n";
 }
 
@@ -106,6 +109,7 @@ int run_child(int argc, char** argv) {
     std::vector<std::string> denied_tools;
     std::string_view policy_path;
     std::string_view audit_file_path;
+    std::string_view strace_file_path;
     std::string_view server_label = "unlabeled";
     bool saw_server_label = false;
     mng::protocol::RuntimeLimits runtime_limits;
@@ -138,6 +142,15 @@ int run_child(int argc, char** argv) {
                 return 2;
             }
             audit_file_path = argv[++index];
+            continue;
+        }
+        if (argument == "--strace-file") {
+            if (!strace_file_path.empty() || index + 1 >= argc ||
+                !mng::process::valid_strace_output_path(argv[index + 1])) {
+                print_run_usage(std::cerr);
+                return 2;
+            }
+            strace_file_path = argv[++index];
             continue;
         }
         if (argument == "--server-label") {
@@ -274,10 +287,12 @@ int run_child(int argc, char** argv) {
         const mng::audit::SessionIdentity& identity_;
         std::chrono::steady_clock::time_point started_{};
     } observer{audit_sink ? &*audit_sink : nullptr, session_identity};
+    const auto traced_command = mng::process::make_strace_command(
+        argv + separator + 1,
+        static_cast<std::size_t>(argc - separator - 1),
+        strace_file_path.empty() ? nullptr : strace_file_path.data());
     return mng::process::run_stdio_child(
-        std::span<char* const>{
-            argv + separator + 1,
-            static_cast<std::size_t>(argc - separator - 1)},
+        std::span<char* const>{traced_command.data(), traced_command.size() - 1U},
         &filter,
         run_config,
         &observer);
