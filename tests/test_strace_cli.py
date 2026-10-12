@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -59,7 +60,7 @@ class StraceCliTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(inspect.returncode, 0, inspect.stderr)
-            self.assertIn('"inventory_version":1', inspect.stdout)
+            self.assertEqual(json.loads(inspect.stdout)["inventory_version"], 1)
             self.assertEqual(inspect_trace.read_text(), "test tracer invoked\n")
 
     def test_invalid_trace_paths(self) -> None:
