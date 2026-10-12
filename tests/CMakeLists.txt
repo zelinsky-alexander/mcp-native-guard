@@ -16,6 +16,11 @@ if(Python3_Interpreter_FOUND)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(mcp_native_guard_strace_command_tests strace_command_test.cpp)
+    target_compile_features(mcp_native_guard_strace_command_tests PRIVATE cxx_std_20)
+    target_link_libraries(mcp_native_guard_strace_command_tests PRIVATE mcp_native_guard::core)
+    add_test(NAME mcp_native_guard_strace_command_tests COMMAND mcp_native_guard_strace_command_tests)
+
     add_executable(mcp_native_guard_test_echo_server jsonl_echo_server.cpp)
     target_compile_features(mcp_native_guard_test_echo_server PRIVATE cxx_std_20)
 
