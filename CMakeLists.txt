@@ -54,6 +54,7 @@ add_library(mcp_native_guard_core
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(mcp_native_guard_core PRIVATE
         src/linux_stdio_relay.cpp
+        src/strace_command.cpp
         src/atomic_file_writer.cpp
         src/doctor.cpp
         src/inspect.cpp
