@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add opt-in `--strace-file` syscall tracing for Linux `run` and `inspect` through an
+  externally installed `strace` executable; no tracing or isolation changes by default.
 - Add a `policy create` command that deterministically generates a version-1 default-deny policy
   from a version-1 `inspect` inventory, allowing only explicitly named `--allow-tool` tools.
 - Add the real MCP server smoke-test workflow and 0.1 release-hardening documentation.
