@@ -225,6 +225,23 @@ documented in [`docs/policy-create.md`](docs/policy-create.md).
 - `policy create` only encodes an explicit `--allow-tool` allow list; it never classifies tool safety and does not prove server safety or provide OS containment.
 - HTTP transports, OAuth, TLS termination, Windows process isolation, policy hot reload, wildcard rules, dashboards, metrics, and log rotation are not implemented.
 
+## Optional syscall diagnostics
+
+On Linux, `run` and `inspect` optionally accept `--strace-file PATH`.
+When selected, Native Guard launches a separately installed `strace` utility
+around the downstream MCP process. Its child-process-following syscall trace
+is written to the given file, not MCP stdout. The option is off by default,
+adds overhead, and **does not provide sandboxing**.
+
+```sh
+mcp-native-guard inspect --strace-file /tmp/mcp-inspect.trace -- node server.js
+mcp-native-guard run --strace-file /tmp/mcp-run.trace -- node server.js
+```
+
+See [strace usage and risk notes](docs/strace.md) and
+[dependency ADR](docs/adr/0001-optional-external-strace.md).
+Observatory's default runtime-discovery image does not include `strace`.
+
 ## Real MCP server smoke test
 
 A repeatable external smoke harness is available for JSONL-compatible Linux stdio MCP servers:
