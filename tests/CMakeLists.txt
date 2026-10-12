@@ -21,6 +21,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(mcp_native_guard_strace_command_tests PRIVATE mcp_native_guard::core)
     add_test(NAME mcp_native_guard_strace_command_tests COMMAND mcp_native_guard_strace_command_tests)
 
+    if(Python3_Interpreter_FOUND)
+        add_test(
+            NAME mcp_native_guard_strace_cli_tests
+            COMMAND
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_strace_cli.py
+                $<TARGET_FILE:mcp-native-guard>
+                $<TARGET_FILE:mng_test_mcp_server>
+        )
+    endif()
+
     add_executable(mcp_native_guard_test_echo_server jsonl_echo_server.cpp)
     target_compile_features(mcp_native_guard_test_echo_server PRIVATE cxx_std_20)
 
