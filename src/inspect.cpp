@@ -3,6 +3,7 @@
 #include "mcp_native_guard/io/atomic_file_writer.hpp"
 #include "mcp_native_guard/protocol/json_rpc_envelope.hpp"
 #include "mcp_native_guard/protocol/tool_inventory.hpp"
+#include "mcp_native_guard/process/strace_command.hpp"
 
 #include <array>
 #include <cerrno>
@@ -141,7 +142,7 @@ void print_inspect_usage(std::ostream& output) {
               "[--max-message-bytes N] [--max-nesting-depth N] "
               "[--max-tools N] [--max-tool-name-bytes N] "
               "[--max-tool-description-bytes N] [--max-tool-schema-bytes N] "
-              "[--output PATH] -- <server> [args...]\n";
+              "[--output PATH] [--strace-file PATH] -- <server> [args...]\n";
 }
 
 void terminate_process_group(pid_t pgid, unsigned shutdown_timeout_ms) noexcept {
@@ -407,6 +408,7 @@ enum class ReceiveStatus : unsigned char {
 int run_inspect(int argc, char** argv) noexcept {
     InspectLimits limits;
     std::string_view output_path;
+    std::string_view strace_file_path;
     bool saw_timeout = false;
     bool saw_shutdown = false;
     bool saw_max_message = false;
@@ -416,6 +418,7 @@ int run_inspect(int argc, char** argv) noexcept {
     bool saw_max_description = false;
     bool saw_max_schema = false;
     bool saw_output = false;
+    bool saw_strace = false;
     int separator = -1;
 
     for (int index = 2; index < argc; ++index) {
@@ -500,6 +503,15 @@ int run_inspect(int argc, char** argv) noexcept {
                 print_inspect_usage(std::cerr);
                 return 2;
             }
+        } else if (argument == "--strace-file") {
+            if (saw_strace || index + 1 >= argc ||
+                !valid_strace_output_path(argv[index + 1])) {
+                std::cerr << "invalid --strace-file\n";
+                print_inspect_usage(std::cerr);
+                return 2;
+            }
+            saw_strace = true;
+            strace_file_path = argv[++index];
         } else if (argument == "--output") {
             if (saw_output || index + 1 >= argc || std::string_view{argv[index + 1]} == "--") {
                 std::cerr << "invalid --output\n";
@@ -534,6 +546,10 @@ int run_inspect(int argc, char** argv) noexcept {
     command.push_back(nullptr);
 
     const std::string_view downstream = executable_basename(command.front());
+    if (!strace_file_path.empty()) {
+        command = make_strace_command(
+            command.data(), command.size() - 1U, strace_file_path.data());
+    }
     SpawnedChild child;
     if (!spawn_inspect_child(command.data(), child)) {
         std::cerr << "FAIL downstream process start\n";
